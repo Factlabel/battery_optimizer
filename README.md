@@ -22,7 +22,7 @@ Battery Optimizer (Pilot Version) は、Streamlit と PuLP を利用してバッ
    git clone https://github.com/Factlabel/battery_optimizer.git
    cd battery_optimizer
    
-2. **仮想環境の作成（推奨**
+2. **仮想環境の作成（推奨）**
 
    ```bash
    python -m venv .venv
@@ -66,15 +66,16 @@ Homebrew でインストールした CBC を使用するには、コード内で
    solver = pulp.PULP_CBC_CMD(path="/opt/homebrew/bin/cbc", msg=0)
    
 ## プロジェクト構成
-battery_optimizer/
-├── .venv/                          # 仮想環境ディレクトリ
+```bash
+   battery_optimizer/
+├── .venv/                          # 仮想環境
 ├── assets/
 │   └── images/
-│       └── LOGO_factlabel.png      # アプリで使用するロゴ画像
+│       └── LOGO_factlabel.png      # ロゴ画像
 ├── src/
-│   ├── __init__.py
+│   ├── init.py
 │   ├── optimization.py             # 最適化処理のロジック（PuLP 使用）
-│   └── config.py                   # 各種設定や定数
-├── main.py                         # アプリケーションのエントリーポイント
-├── requirements.txt                # 依存パッケージ一覧
-└── README.md                       # このファイル
+│   └── config.py                   # エリアごとの託送料金、損失率
+├── main.py                         # アプリケーションポータル
+├── requirements.txt                # パッケージ一覧
+└── README.md                       
