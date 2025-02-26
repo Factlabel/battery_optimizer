@@ -16,7 +16,7 @@ def main():
     # --------------------------
     #  1) 基本パラメータ入力
     # --------------------------
-    st.header("基本パラメータ設定")
+    st.subheader("基本パラメータ設定")
 
     # エリア選択
     selected_area_num = st.selectbox(
@@ -48,14 +48,14 @@ def main():
     # --------------------------
     #  2) CSVテンプレートダウンロード
     # --------------------------
-    st.header("CSVテンプレートのダウンロード")
+    st.subheader("CSVテンプレートのダウンロード")
     csv_template = (
         "date,slot,JEPX_prediction,JEPX_actual,EPRX1_prediction,EPRX3_prediction,EPRX1_actual,EPRX3_actual,imbalance\n"
         "2023/4/1,1,6.19,10.5,19.5,0.34,19.5,0.34,10.5\n"
     )
 
     st.download_button(
-        label="CSVテンプレートをダウンロード",
+        label="ダウンロード",
         data=csv_template,
         file_name="csv_template.csv",
         mime="text/csv"
@@ -64,7 +64,7 @@ def main():
     # --------------------------
     #  3) CSVアップロード
     # --------------------------
-    st.header("価格データ (CSV) アップロード")
+    st.subheader("価格データ (CSV) アップロード")
     data_file = st.file_uploader("DATA_CSV", type=["csv"])
 
     if "calc_results" not in st.session_state:
@@ -80,7 +80,7 @@ def main():
         if "date" in df_all.columns:
             df_all["date"] = pd.to_datetime(df_all["date"], errors="coerce")
 
-        if st.button("Calculate"):
+        if st.button("計算"):
             results, day_profit, final_profit = run_optimization(
                 target_area_name=target_area_name,
                 voltage_type=voltage_type,
@@ -112,7 +112,7 @@ def main():
         day_profit = st.session_state["calc_day_profit"]
         final_profit = st.session_state["calc_final_profit"]
 
-        st.success("Calculation Completed.")
+        st.success("計算完了")
         st.write(f"**Total Profit(実際価格ベース・税込)**: {day_profit:,d} 円")
         st.write(f"**Final Profit (託送料金控除後・税込)**: {final_profit:,d} 円")
 
@@ -172,14 +172,14 @@ def main():
         # 詳細結果のダウンロード
         csv_data = df_res.to_csv(index=False)
         st.download_button(
-            label="Download CSV",
+            label="CSV ダウンロード",
             data=csv_data,
             file_name="optimal_transactions.csv",
             mime="text/csv"
         )
 
         # ★ ここから月別サマリの出力（サマリーダウンロード）
-        st.subheader("月別サマリ")
+        st.subheader("月別サマリー")
         df_summary = generate_monthly_summary(
             transactions=st.session_state["calc_results"],
             battery_loss_rate=battery_loss_rate,
@@ -196,7 +196,7 @@ def main():
             mime="text/csv"
         )
     else:
-        st.write("ファイルをアップロード後、Calculate ボタンを押してください。")
+        st.write("ファイルをアップロード後、計算 ボタンを押してください。")
 
 
 if __name__ == "__main__":

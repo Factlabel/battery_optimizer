@@ -317,13 +317,7 @@ def generate_monthly_summary(
     target_area_name: str,
     voltage_type: str
 ):
-    """
-    取引データ（各スロットの詳細）から月ごとの集計結果を生成します。
-    集計項目：
-      - 月別累計充電量、放電量、EPRX3量、imbalance、損益、充放電ロス量
-      - 月間のwheeling_usage_fee、renewable_energy_surcharge（config.pyの定数を使用）
-      - action出現回数、各平均単価
-    """
+
     import pandas as pd
     from src.config import WHEELING_DATA, RENEWABLE_ENERGY_SURCHARGE
 
@@ -378,20 +372,20 @@ def generate_monthly_summary(
             avg_eprx1_price = None
 
         summary_list.append({
-            "月": month,
-            "月別累計充電量_kWh": monthly_charge,
-            "月別累計放電量_kWh": group[group["action"]=="discharge"]["discharge_kWh"].sum(),
-            "月別累計EPRX3_kWh": group[group["action"]=="EPRX3"]["EPRX3_kWh"].sum(),
-            "月別累計imbalance": monthly_imbalance,
-            "月間累計Total_Daily_PnL": monthly_total_pnl,
-            "月間累計充放電ロス量_kWh": loss,
-            "月間累計wheeling_usage_fee": monthly_wheeling_fee,
-            "月間累計renewable_energy_surcharge": monthly_renewable_energy_surcharge,
-            "月別action出現数": action_counts_str,
-            "月別平均充電単価": avg_charge_price,
-            "月別平均放電単価": avg_discharge_price,
-            "月間平均EPRX3単価": avg_eprx3_price,
-            "月間平均EPRX1単価": avg_eprx1_price,
+            "Month": month,
+            "Total_Charge_kWh": monthly_charge,
+            "Total_Discharge_kWh": group[group["action"] == "discharge"]["discharge_kWh"].sum(),
+            "Total_EPRX3_kWh": group[group["action"] == "EPRX3"]["EPRX3_kWh"].sum(),
+            "Total_Imbalance": monthly_imbalance,
+            "Total_Daily_PnL": monthly_total_pnl,
+            "Total_Charge_Discharge_Loss_kWh": loss,
+            "Total_Wheeling_Usage_Fee": monthly_wheeling_fee,
+            "Total_Renewable_Energy_Surcharge": monthly_renewable_energy_surcharge,
+            "Action_Counts": action_counts_str,
+            "Average_Charge_Price": avg_charge_price,
+            "Average_Discharge_Price": avg_discharge_price,
+            "Average_EPRX3_Price": avg_eprx3_price,
+            "Average_EPRX1_Price": avg_eprx1_price,
         })
 
     return pd.DataFrame(summary_list)
