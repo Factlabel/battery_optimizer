@@ -1,6 +1,6 @@
-"""
-託送データ
-"""
+
+
+RENEWABLE_ENERGY_SURCHARGE = 3.49
 
 WHEELING_DATA = {
     "areas": {

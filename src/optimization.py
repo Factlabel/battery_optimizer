@@ -22,7 +22,6 @@ def run_optimization(
 ):
 
     # -----------------------------
-
     # 1) 地域の託送料金・損失率を取得
     wh = WHEELING_DATA["areas"].get(target_area_name, {}).get(voltage_type, {})
     wheeling_loss_rate = wh.get("loss_rate", 0.0)
@@ -33,8 +32,8 @@ def run_optimization(
     required_cols = {
         "date", "slot",
         "JEPX_prediction", "JEPX_actual",
-        "EPRX1_prediction", "EPRX1_actual",
-        "EPRX3_prediction", "EPRX3_actual",
+        "EPRX1_prediction", "EPRX3_prediction",
+        "EPRX1_actual", "EPRX3_actual",
         "imbalance"
     }
     if not required_cols.issubset(df_all.columns):
@@ -309,3 +308,90 @@ def run_optimization(
     final_profit = total_profit - monthly_fee
 
     return all_transactions, round(total_profit), round(final_profit)
+
+
+def generate_monthly_summary(
+    transactions: list,
+    battery_loss_rate: float,
+    battery_power_kW: float,
+    target_area_name: str,
+    voltage_type: str
+):
+    """
+    取引データ（各スロットの詳細）から月ごとの集計結果を生成します。
+    集計項目：
+      - 月別累計充電量、放電量、EPRX3量、imbalance、損益、充放電ロス量
+      - 月間のwheeling_usage_fee、renewable_energy_surcharge（config.pyの定数を使用）
+      - action出現回数、各平均単価
+    """
+    import pandas as pd
+    from src.config import WHEELING_DATA, RENEWABLE_ENERGY_SURCHARGE
+
+    df = pd.DataFrame(transactions)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["month"] = df["date"].dt.to_period("M").astype(str)
+    summary_list = []
+
+    for month, group in df.groupby("month"):
+        monthly_charge = group[group["action"]=="charge"]["charge_kWh"].sum()
+        effective_discharge = (
+            group[group["action"]=="discharge"]["discharge_kWh"].sum() * (1 - battery_loss_rate)
+            + group[group["action"]=="EPRX3"]["EPRX3_kWh"].sum() * (1 - battery_loss_rate)
+        )
+        loss = monthly_charge - effective_discharge
+        if loss < 0:
+            loss = 0
+        monthly_imbalance = group["imbalance"].sum()
+        monthly_total_pnl = group["Total_Daily_PnL"].sum()
+
+        wh = WHEELING_DATA["areas"].get(target_area_name, {}).get(voltage_type, {})
+        wheeling_base_charge = wh.get("wheeling_base_charge", 0.0)
+        wheeling_usage_fee = wh.get("wheeling_usage_fee", 0.0)
+        monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * loss
+        monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * loss
+
+        action_counts = group["action"].value_counts().to_dict()
+        action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
+
+        charge_group = group[group["action"]=="charge"]
+        if charge_group["charge_kWh"].sum() > 0:
+            avg_charge_price = charge_group["JEPX_PnL"].sum() / charge_group["charge_kWh"].sum()
+        else:
+            avg_charge_price = None
+
+        discharge_group = group[group["action"]=="discharge"]
+        if discharge_group["discharge_kWh"].sum() > 0:
+            avg_discharge_price = discharge_group["JEPX_PnL"].sum() / discharge_group["discharge_kWh"].sum()
+        else:
+            avg_discharge_price = None
+
+        eprx3_group = group[group["action"]=="EPRX3"]
+        if eprx3_group["EPRX3_kWh"].sum() > 0:
+            avg_eprx3_price = eprx3_group["EPRX3_PnL"].sum() / eprx3_group["EPRX3_kWh"].sum()
+        else:
+            avg_eprx3_price = None
+
+        eprx1_group = group[group["action"]=="EPRX1"]
+        if not eprx1_group.empty:
+            avg_eprx1_price = eprx1_group["EPRX1_actual"].mean()
+        else:
+            avg_eprx1_price = None
+
+        summary_list.append({
+            "月": month,
+            "月別累計充電量_kWh": monthly_charge,
+            "月別累計放電量_kWh": group[group["action"]=="discharge"]["discharge_kWh"].sum(),
+            "月別累計EPRX3_kWh": group[group["action"]=="EPRX3"]["EPRX3_kWh"].sum(),
+            "月別累計imbalance": monthly_imbalance,
+            "月間累計Total_Daily_PnL": monthly_total_pnl,
+            "月間累計充放電ロス量_kWh": loss,
+            "月間累計wheeling_usage_fee": monthly_wheeling_fee,
+            "月間累計renewable_energy_surcharge": monthly_renewable_energy_surcharge,
+            "月別action出現数": action_counts_str,
+            "月別平均充電単価": avg_charge_price,
+            "月別平均放電単価": avg_discharge_price,
+            "月間平均EPRX3単価": avg_eprx3_price,
+            "月間平均EPRX1単価": avg_eprx1_price,
+        })
+
+    return pd.DataFrame(summary_list)

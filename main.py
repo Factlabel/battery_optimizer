@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import pulp
 
-from src.optimization import run_optimization
-from src.config import AREA_NUMBER_TO_NAME
+from src.optimization import run_optimization, generate_monthly_summary
+from src.config import AREA_NUMBER_TO_NAME, WHEELING_DATA, RENEWABLE_ENERGY_SURCHARGE
 
 def main():
     # ★ ロゴの表示
@@ -105,7 +105,7 @@ def main():
                 st.session_state["calc_final_profit"] = final_profit
 
     # --------------------------
-    #  5) 結果表示
+    #  5) 結果表示およびサマリ出力
     # --------------------------
     if st.session_state["calc_results"] is not None:
         results = st.session_state["calc_results"]
@@ -169,12 +169,30 @@ def main():
         ax2.legend(loc="upper right")
         st.pyplot(fig)
 
-        # ダウンロードボタン
+        # 詳細結果のダウンロード
         csv_data = df_res.to_csv(index=False)
         st.download_button(
             label="Download CSV",
             data=csv_data,
             file_name="optimal_transactions.csv",
+            mime="text/csv"
+        )
+
+        # ★ ここから月別サマリの出力（サマリーダウンロード）
+        st.subheader("月別サマリ")
+        df_summary = generate_monthly_summary(
+            transactions=st.session_state["calc_results"],
+            battery_loss_rate=battery_loss_rate,
+            battery_power_kW=battery_power_kW,
+            target_area_name=target_area_name,
+            voltage_type=voltage_type
+        )
+        st.dataframe(df_summary)
+        csv_summary = df_summary.to_csv(index=False)
+        st.download_button(
+            label="サマリーダウンロード",
+            data=csv_summary,
+            file_name="monthly_summary.csv",
             mime="text/csv"
         )
     else:
