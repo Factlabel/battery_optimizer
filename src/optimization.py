@@ -5,7 +5,7 @@ import pulp
 
 from src.config import WHEELING_DATA, AREA_NUMBER_TO_NAME
 
-TAX = 1.1  # 税率（例として10%）
+TAX = 1.1
 
 def run_optimization(
     target_area_name: str,
@@ -181,7 +181,7 @@ def run_optimization(
             e3pred = df_day.loc[i, "EPRX3_prediction"]
             if pd.isna(e3pred):
                 e3pred = 0.0
-            # EPRX3 の収益も effective energy に基づく
+            # ここは最適化のための収益項（取引出力のPLとは異なる）
             rev_e3 = e3pred * (eprx3[i] * half_power_kWh * (1 - battery_loss_rate))
 
             e1pred = df_day.loc[i, "EPRX1_prediction"]
@@ -229,7 +229,7 @@ def run_optimization(
             d_kwh = d_val * half_power_kWh
             e3_kwh = e3_val * half_power_kWh
 
-            # 各アクションごとに、実効供給量とロス量を計算
+            # 実効供給量とロス量を計算
             if act == "discharge":
                 effective_kwh = d_kwh * (1 - battery_loss_rate)
                 loss_kwh = d_kwh * battery_loss_rate
@@ -239,11 +239,13 @@ def run_optimization(
             elif act == "EPRX3":
                 effective_kwh = e3_kwh * (1 - battery_loss_rate)
                 loss_kwh = e3_kwh * battery_loss_rate
-                slot_eprx3_pnl = e3_a * TAX * effective_kwh
+                kW_value = battery_power_kW * e3_a
+                kWh_value = effective_kwh * imb_a
+                slot_eprx3_pnl = TAX * (kW_value + kWh_value)
                 slot_jepx_pnl = 0.0
                 slot_eprx1_pnl = 0.0
             elif act == "charge":
-                effective_kwh = c_kwh  # 充電はロスなし
+                effective_kwh = c_kwh
                 loss_kwh = 0.0
                 cost = j_a * TAX * (c_kwh / (1 - wheeling_loss_rate))
                 slot_jepx_pnl = -cost
@@ -295,7 +297,7 @@ def run_optimization(
         if (yearly_cycle_limit > 0) and (total_cycles_used > yearly_cycle_limit):
             break
 
-    # 最終利益計算（内部ロスはここでは effective 値から除外済み）
+    # 最終利益計算
     total_charge_kWh = 0.0
     total_discharge_kWh = 0.0
     total_loss_kWh = 0.0
