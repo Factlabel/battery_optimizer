@@ -5,6 +5,8 @@ import pulp
 
 from src.config import WHEELING_DATA, AREA_NUMBER_TO_NAME
 
+TAX = 1.1  # 税率（例として10%）
+
 def run_optimization(
     target_area_name: str,
     voltage_type: str,
@@ -21,7 +23,6 @@ def run_optimization(
     df_all: pd.DataFrame
 ):
 
-    # -----------------------------
     # 1) 地域の託送料金・損失率を取得
     wh = WHEELING_DATA["areas"].get(target_area_name, {}).get(voltage_type, {})
     wheeling_loss_rate = wh.get("loss_rate", 0.0)
@@ -44,16 +45,14 @@ def run_optimization(
     df_all.sort_values(by=["date", "slot"], inplace=True, ignore_index=True)
     total_slots = len(df_all)
 
-    # 全体スロット数に対し、1日あたり forecast_period スロットとして何日分あるか
     num_days = (total_slots + forecast_period - 1) // forecast_period
 
-    # 状態保持用
     carry_over_soc = 0.0
     all_transactions = []
     total_profit = 0.0
     total_cycles_used = 0.0
 
-    # 放充電量(1スロット=0.5h)
+    # 1スロットあたりの充放電量 (0.5h)
     half_power_kWh = battery_power_kW * 0.5
 
     # 4) 日ごとのループ
@@ -70,7 +69,7 @@ def run_optimization(
             break
 
         # ---------------------
-        # パラメータ設定 (線形最適化)
+        # 線形最適化問題の構築
         # ---------------------
         prob = pulp.LpProblem(f"Battery_Optimization_Day{day_idx+1}", pulp.LpMaximize)
 
@@ -123,7 +122,7 @@ def run_optimization(
             if pd.isna(e3pred) or e3pred == 0:
                 prob += eprx3[i] <= 0
 
-        # (B) 同一スロットで EPRX1ブロック中なら 他動作(充電等)禁止
+        # (B) 同一スロットで EPRX1ブロック中なら 他動作禁止
         for i in range(day_slots):
             prob += (charge[i] + discharge[i] + eprx3[i]) <= (1 - is_in_block[i])
 
@@ -160,7 +159,7 @@ def run_optimization(
                 if pd.isna(e1pred) or e1pred == 0:
                     prob += block_start[i] <= 0
 
-        # (H) EPRX1スロット中の SoC は 40〜60% に制限
+        # (H) EPRX1スロット中の SoC 制限
         for i in range(day_slots):
             prob += battery_soc[i] >= 0.4 * battery_capacity_kWh - (1 - is_in_block[i]) * bigM
             prob += battery_soc[i] <= 0.6 * battery_capacity_kWh + (1 - is_in_block[i]) * bigM
@@ -182,22 +181,16 @@ def run_optimization(
             e3pred = df_day.loc[i, "EPRX3_prediction"]
             if pd.isna(e3pred):
                 e3pred = 0.0
-            imb = df_day.loc[i, "imbalance"]
-            if pd.isna(imb):
-                imb = 0.0
-
-            rev_e3 = e3pred * (eprx3[i] * battery_power_kW)
-            rev_e3 += (half_power_kWh * (1 - battery_loss_rate)) * imb * eprx3[i]
+            # EPRX3 の収益も effective energy に基づく
+            rev_e3 = e3pred * (eprx3[i] * half_power_kWh * (1 - battery_loss_rate))
 
             e1pred = df_day.loc[i, "EPRX1_prediction"]
             if pd.isna(e1pred):
                 e1pred = 0.0
-
             rev_e1 = e1pred * (battery_power_kW) * is_in_block[i]
 
             slot_profit = -cost_c + rev_d + rev_e3 + rev_e1
             profit_terms.append(slot_profit)
-
         prob += pulp.lpSum(profit_terms)
 
         solver = pulp.PULP_CBC_CMD(msg=0, threads=4)
@@ -206,12 +199,9 @@ def run_optimization(
         if status != "Optimal":
             continue
 
-        # 実際価格ベースの損益計算
         day_profit = 0.0
         final_soc = pulp.value(battery_soc[day_slots])
         carry_over_soc = final_soc
-
-        TAX = 1.1  # 10%
 
         day_transactions = []
         for i in range(day_slots):
@@ -239,26 +229,38 @@ def run_optimization(
             d_kwh = d_val * half_power_kWh
             e3_kwh = e3_val * half_power_kWh
 
-            slot_jepx_pnl = 0.0
-            slot_eprx1_pnl = 0.0
-            slot_eprx3_pnl = 0.0
-
-            if act == "charge":
-                cost = j_a * TAX * (c_kwh / (1 - wheeling_loss_rate))
-                slot_jepx_pnl -= cost
-
-            elif act == "discharge":
-                rev = j_a * TAX * (d_kwh * (1 - battery_loss_rate))
-                slot_jepx_pnl += rev
-
+            # 各アクションごとに、実効供給量とロス量を計算
+            if act == "discharge":
+                effective_kwh = d_kwh * (1 - battery_loss_rate)
+                loss_kwh = d_kwh * battery_loss_rate
+                slot_jepx_pnl = j_a * TAX * effective_kwh
+                slot_eprx1_pnl = 0.0
+                slot_eprx3_pnl = 0.0
             elif act == "EPRX3":
-                rev = e3_a * TAX * battery_power_kW
-                rev += TAX * (e3_kwh * (1 - battery_loss_rate)) * imb_a
-                slot_eprx3_pnl += rev
-
+                effective_kwh = e3_kwh * (1 - battery_loss_rate)
+                loss_kwh = e3_kwh * battery_loss_rate
+                slot_eprx3_pnl = e3_a * TAX * effective_kwh
+                slot_jepx_pnl = 0.0
+                slot_eprx1_pnl = 0.0
+            elif act == "charge":
+                effective_kwh = c_kwh  # 充電はロスなし
+                loss_kwh = 0.0
+                cost = j_a * TAX * (c_kwh / (1 - wheeling_loss_rate))
+                slot_jepx_pnl = -cost
+                slot_eprx1_pnl = 0.0
+                slot_eprx3_pnl = 0.0
             elif act == "EPRX1":
-                rev = e1_a * TAX * battery_power_kW
-                slot_eprx1_pnl += rev
+                effective_kwh = 0.0
+                loss_kwh = 0.0
+                slot_eprx1_pnl = e1_a * TAX * battery_power_kW
+                slot_jepx_pnl = 0.0
+                slot_eprx3_pnl = 0.0
+            else:
+                effective_kwh = 0.0
+                loss_kwh = 0.0
+                slot_jepx_pnl = 0.0
+                slot_eprx1_pnl = 0.0
+                slot_eprx3_pnl = 0.0
 
             slot_total_pnl = slot_jepx_pnl + slot_eprx1_pnl + slot_eprx3_pnl
             day_profit += slot_total_pnl
@@ -269,8 +271,9 @@ def run_optimization(
                 "action": act,
                 "battery_level_kWh": round(pulp.value(battery_soc[i+1]), 2),
                 "charge_kWh": round(c_kwh, 3),
-                "discharge_kWh": round(d_kwh, 3),
-                "EPRX3_kWh": round(e3_kwh, 3),
+                "discharge_kWh": round(effective_kwh, 3) if act == "discharge" else 0,
+                "EPRX3_kWh": round(effective_kwh, 3) if act == "EPRX3" else 0,
+                "loss_kWh": round(loss_kwh, 3),
                 "JEPX_actual": round(j_a, 3),
                 "EPRX1_actual": round(e1_a, 3),
                 "EPRX3_actual": round(e3_a, 3),
@@ -292,19 +295,22 @@ def run_optimization(
         if (yearly_cycle_limit > 0) and (total_cycles_used > yearly_cycle_limit):
             break
 
-    # 託送料金を差し引いた最終利益計算
+    # 最終利益計算（内部ロスはここでは effective 値から除外済み）
     total_charge_kWh = 0.0
     total_discharge_kWh = 0.0
+    total_loss_kWh = 0.0
     for r in all_transactions:
         if r["action"] == "charge":
             total_charge_kWh += r["charge_kWh"]
         elif r["action"] == "discharge":
-            total_discharge_kWh += r["discharge_kWh"] * (1 - battery_loss_rate)
+            total_discharge_kWh += r["discharge_kWh"]
+            total_loss_kWh += r["loss_kWh"]
         elif r["action"] == "EPRX3":
-            total_discharge_kWh += r["EPRX3_kWh"] * (1 - battery_loss_rate)
+            total_discharge_kWh += r["EPRX3_kWh"]
+            total_loss_kWh += r["loss_kWh"]
 
     usage_fee_kWh = max(0, total_charge_kWh - total_discharge_kWh)
-    monthly_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * usage_fee_kWh
+    monthly_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss_kWh
     final_profit = total_profit - monthly_fee
 
     return all_transactions, round(total_profit), round(final_profit)
@@ -329,20 +335,17 @@ def generate_monthly_summary(
     for month, group in df.groupby("month"):
         monthly_charge = group[group["action"]=="charge"]["charge_kWh"].sum()
         effective_discharge = (
-            group[group["action"]=="discharge"]["discharge_kWh"].sum() * (1 - battery_loss_rate)
-            + group[group["action"]=="EPRX3"]["EPRX3_kWh"].sum() * (1 - battery_loss_rate)
+            group[group["action"]=="discharge"]["discharge_kWh"].sum() +
+            group[group["action"]=="EPRX3"]["EPRX3_kWh"].sum()
         )
-        loss = monthly_charge - effective_discharge
-        if loss < 0:
-            loss = 0
-        monthly_imbalance = group["imbalance"].sum()
+        total_loss = group["loss_kWh"].sum()
         monthly_total_pnl = group["Total_Daily_PnL"].sum()
 
         wh = WHEELING_DATA["areas"].get(target_area_name, {}).get(voltage_type, {})
         wheeling_base_charge = wh.get("wheeling_base_charge", 0.0)
         wheeling_usage_fee = wh.get("wheeling_usage_fee", 0.0)
-        monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * loss
-        monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * loss
+        monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
+        monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
 
         action_counts = group["action"].value_counts().to_dict()
         action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
@@ -374,11 +377,10 @@ def generate_monthly_summary(
         summary_list.append({
             "Month": month,
             "Total_Charge_kWh": monthly_charge,
-            "Total_Discharge_kWh": group[group["action"] == "discharge"]["discharge_kWh"].sum(),
-            "Total_EPRX3_kWh": group[group["action"] == "EPRX3"]["EPRX3_kWh"].sum(),
-            "Total_Imbalance": monthly_imbalance,
+            "Total_Discharge_kWh": effective_discharge,
+            "Total_Loss_kWh": total_loss,
+            "Total_Imbalance": group["imbalance"].sum(),
             "Total_Daily_PnL": monthly_total_pnl,
-            "Total_Charge_Discharge_Loss_kWh": loss,
             "Total_Wheeling_Usage_Fee": monthly_wheeling_fee,
             "Total_Renewable_Energy_Surcharge": monthly_renewable_energy_surcharge,
             "Action_Counts": action_counts_str,

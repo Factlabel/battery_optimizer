@@ -8,17 +8,12 @@ from src.optimization import run_optimization, generate_monthly_summary
 from src.config import AREA_NUMBER_TO_NAME, WHEELING_DATA, RENEWABLE_ENERGY_SURCHARGE
 
 def main():
-    # ★ ロゴの表示
     st.image("assets/images/LOGO_factlabel.png", width=100)
     st.markdown("<div style='margin-top:-20px;'></div>", unsafe_allow_html=True)
     st.title("Battery Optimizer (Pilot Version)")
 
-    # --------------------------
-    #  1) 基本パラメータ入力
-    # --------------------------
     st.subheader("基本パラメータ設定")
 
-    # エリア選択
     selected_area_num = st.selectbox(
         "対象エリア (1-9)",
         options=list(AREA_NUMBER_TO_NAME.keys()),
@@ -39,15 +34,11 @@ def main():
 
     forecast_period = st.number_input("予測対象スロット数", min_value=48, value=48, step=48)
 
-    # EPRX1ブロック設定
     st.subheader("EPRX1ブロック設定")
     eprx1_block_size = st.number_input("EPRX1 連続スロット数 (M)", min_value=1, value=3, step=1)
     eprx1_block_cooldown = st.number_input("EPRX1 ブロック終了後のSoC調整スロット数 (C)", min_value=0, value=2, step=1)
     max_daily_eprx1_slots = st.number_input("1日のEPRX1スロット最大数 (0=制限なし)", min_value=0, value=6, step=1)
 
-    # --------------------------
-    #  2) CSVテンプレートダウンロード
-    # --------------------------
     st.subheader("CSVテンプレートのダウンロード")
     csv_template = (
         "date,slot,JEPX_prediction,JEPX_actual,EPRX1_prediction,EPRX3_prediction,EPRX1_actual,EPRX3_actual,imbalance\n"
@@ -61,9 +52,6 @@ def main():
         mime="text/csv"
     )
 
-    # --------------------------
-    #  3) CSVアップロード
-    # --------------------------
     st.subheader("価格データ (CSV) アップロード")
     data_file = st.file_uploader("DATA_CSV", type=["csv"])
 
@@ -71,42 +59,42 @@ def main():
         st.session_state["calc_results"] = None
         st.session_state["calc_day_profit"] = 0.0
         st.session_state["calc_final_profit"] = 0.0
+    if "calc_in_progress" not in st.session_state:
+        st.session_state["calc_in_progress"] = False
 
-    # --------------------------
-    #  4) 計算実行
-    # --------------------------
     if data_file:
         df_all = pd.read_csv(data_file)
         if "date" in df_all.columns:
             df_all["date"] = pd.to_datetime(df_all["date"], errors="coerce")
 
-        if st.button("計算"):
-            results, day_profit, final_profit = run_optimization(
-                target_area_name=target_area_name,
-                voltage_type=voltage_type,
-                battery_power_kW=battery_power_kW,
-                battery_capacity_kWh=battery_capacity_kWh,
-                battery_loss_rate=battery_loss_rate,
-                daily_cycle_limit=daily_cycle_limit,
-                yearly_cycle_limit=yearly_cycle_limit,
-                annual_degradation_rate=annual_degradation_rate,
-                forecast_period=forecast_period,
-                eprx1_block_size=eprx1_block_size,
-                eprx1_block_cooldown=eprx1_block_cooldown,
-                max_daily_eprx1_slots=max_daily_eprx1_slots,
-                df_all=df_all
-            )
+        if st.button("計算", disabled=st.session_state["calc_in_progress"]):
+            st.session_state["calc_in_progress"] = True
+            with st.spinner("計算中..."):
+                results, day_profit, final_profit = run_optimization(
+                    target_area_name=target_area_name,
+                    voltage_type=voltage_type,
+                    battery_power_kW=battery_power_kW,
+                    battery_capacity_kWh=battery_capacity_kWh,
+                    battery_loss_rate=battery_loss_rate,
+                    daily_cycle_limit=daily_cycle_limit,
+                    yearly_cycle_limit=yearly_cycle_limit,
+                    annual_degradation_rate=annual_degradation_rate,
+                    forecast_period=forecast_period,
+                    eprx1_block_size=eprx1_block_size,
+                    eprx1_block_cooldown=eprx1_block_cooldown,
+                    max_daily_eprx1_slots=max_daily_eprx1_slots,
+                    df_all=df_all
+                )
 
-            if results is None:
-                st.warning("No optimal solution found or missing columns.")
-            else:
-                st.session_state["calc_results"] = results
-                st.session_state["calc_day_profit"] = day_profit
-                st.session_state["calc_final_profit"] = final_profit
+                if results is None:
+                    st.warning("No optimal solution found or missing columns.")
+                else:
+                    st.session_state["calc_results"] = results
+                    st.session_state["calc_day_profit"] = day_profit
+                    st.session_state["calc_final_profit"] = final_profit
 
-    # --------------------------
-    #  5) 結果表示およびサマリ出力
-    # --------------------------
+            st.session_state["calc_in_progress"] = False
+
     if st.session_state["calc_results"] is not None:
         results = st.session_state["calc_results"]
         day_profit = st.session_state["calc_day_profit"]
@@ -120,7 +108,6 @@ def main():
         df_res.sort_values(by=["date", "slot"], inplace=True, ignore_index=True)
         st.dataframe(df_res, height=600)
 
-        # グラフ表示
         st.subheader("バッテリー残量と JEPX実際価格 の推移")
         min_date = df_res["date"].min()
         max_date = df_res["date"].max()
@@ -156,10 +143,8 @@ def main():
         ax2 = ax1.twinx()
         x_vals = range(len(df_g))
 
-        # バッテリー残量 (kWh)
         ax1.bar(x_vals, df_g["battery_level_kWh"], color="lightblue", label="Battery(kWh)")
 
-        # JEPX実際価格
         if "JEPX_actual" in df_g.columns:
             ax2.plot(x_vals, df_g["JEPX_actual"], color="red", label="JEPX(Actual)")
 
@@ -169,7 +154,6 @@ def main():
         ax2.legend(loc="upper right")
         st.pyplot(fig)
 
-        # 詳細結果のダウンロード
         csv_data = df_res.to_csv(index=False)
         st.download_button(
             label="CSV ダウンロード",
@@ -178,7 +162,6 @@ def main():
             mime="text/csv"
         )
 
-        # ★ ここから月別サマリの出力（サマリーダウンロード）
         st.subheader("月別サマリー")
         df_summary = generate_monthly_summary(
             transactions=st.session_state["calc_results"],
