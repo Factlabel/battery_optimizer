@@ -367,6 +367,8 @@ def generate_monthly_summary(
     月別に取引結果を集計し、各項目（充放電量、ロス、収益など）を
     四捨五入した整数値でまとめたDataFrameを返す。
     ただし、_price の項目は小数点以下2位まで表記する。
+    また、Total_Imbalance を Total_EPRX3_kWh に変更し、
+    Average_EPRX3_Price はactionがeprx3のスロットのEPRX3_actualの平均値とする。
     """
     df = pd.DataFrame(transactions)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -404,8 +406,9 @@ def generate_monthly_summary(
             avg_discharge_price = None
 
         eprx3_group = group[group["action"] == "eprx3"]
-        if eprx3_group["EPRX3_kWh"].sum() > 0:
-            avg_eprx3_price = eprx3_group["EPRX3_PnL"].sum() / eprx3_group["EPRX3_kWh"].sum()
+        # Average_EPRX3_Priceは、actionがeprx3のスロットのEPRX3_actualの平均値
+        if not eprx3_group.empty:
+            avg_eprx3_price = eprx3_group["EPRX3_actual"].mean()
         else:
             avg_eprx3_price = None
 
@@ -418,9 +421,10 @@ def generate_monthly_summary(
         summary_list.append({
             "Month": month,
             "Total_Charge_kWh": round(monthly_charge),
-            "Total_Discharge_kWh": round(effective_discharge),
+            "Total_Discharge_KWh": round(effective_discharge),
             "Total_Loss_KWh": round(total_loss),
-            "Total_Imbalance": round(group["imbalance"].sum()),
+            # Total_Imbalance を Total_EPRX3_kWh に変更：actionがeprx3のスロットのEPRX3_kWhの合計
+            "Total_EPRX3_kWh": round(eprx3_group["EPRX3_kWh"].sum()),
             "Total_Daily_PnL": round(monthly_total_pnl),
             "Total_Wheeling_Usage_Fee": round(monthly_wheeling_fee),
             "Total_Renewable_Energy_Surcharge": round(monthly_renewable_energy_surcharge),
