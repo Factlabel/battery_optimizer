@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 import pulp
 
-from src.config import WHEELING_DATA, AREA_NUMBER_TO_NAME
+from src.config import WHEELING_DATA, AREA_NUMBER_TO_NAME, RENEWABLE_ENERGY_SURCHARGE
 
 TAX = 1.1  # 税率（例：10%）
 
@@ -166,8 +166,7 @@ def run_optimization(
         # 充電：charge[i]*half_power_kWh, 放電：discharge[i]*half_power_kWh,
         # EPRX3：固定で half_power_kWh が減少（内部ロスは後で考慮）
         for i in range(day_slots):
-            next_soc = battery_soc[i] + charge[i] * half_power_kWh - discharge[i] * half_power_kWh - is_eprx3[
-                i] * half_power_kWh
+            next_soc = battery_soc[i] + charge[i] * half_power_kWh - discharge[i] * half_power_kWh - is_eprx3[i] * half_power_kWh
             prob += battery_soc[i + 1] == next_soc
 
         # (D) 初期SoCは前日の繰越
@@ -225,11 +224,9 @@ def run_optimization(
             if pd.isna(imb):
                 imb = 0.0
 
-            # 各アクションの収益・コスト
             cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
             rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
             rev_e1 = e1pred * battery_power_kW * is_in_block[i]
-            # EPRX3の場合、放電量は固定（half_power_kWh）として収益を計算
             rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
 
             slot_profit = -cost_c + rev_d + rev_e1 + rev_e3
@@ -248,12 +245,9 @@ def run_optimization(
 
         day_transactions = []
         for i in range(day_slots):
-            # 各アクションの実行状況に応じた量は、charge/dischargeは連続変数、
-            # EPRX3は常に最大値（half_power_kWh）が使用される
             c_val = pulp.value(charge[i]) if pulp.value(charge[i]) is not None else 0
             d_val = pulp.value(discharge[i]) if pulp.value(discharge[i]) is not None else 0
 
-            # アクション判定は排他的バイナリ変数から決定
             if pulp.value(is_in_block[i]) > 0.5:
                 act = "eprx1"
             elif pulp.value(is_charge[i]) > 0.5:
@@ -270,7 +264,6 @@ def run_optimization(
             e3_a = df_day.loc[i, "EPRX3_actual"] if not pd.isna(df_day.loc[i, "EPRX3_actual"]) else 0.0
             imb_a = df_day.loc[i, "imbalance"] if not pd.isna(df_day.loc[i, "imbalance"]) else 0.0
 
-            # 各アクションのエネルギー量・PL計算
             if act == "charge":
                 c_kwh = c_val * half_power_kWh
                 effective_kwh = c_kwh
@@ -293,11 +286,9 @@ def run_optimization(
                 slot_jepx_pnl = 0.0
                 slot_eprx3_pnl = 0.0
             elif act == "eprx3":
-                # EPRX3は数量調整せず、常に最大放電量
+                # EPRX3は数量調整せず、常に最大放電量からロス分を引いた値を使用
                 effective_kwh = half_power_kWh * (1 - battery_loss_rate)
                 loss_kwh = half_power_kWh * battery_loss_rate
-                # 収益は kW価値（battery_power_kW × EPRX3_actual）と
-                # kWh価値（half_power_kWh×(1–battery_loss_rate) × imbalance）を合算
                 kW_value = battery_power_kW * e3_a
                 kWh_value = half_power_kWh * (1 - battery_loss_rate) * imb_a
                 slot_eprx3_pnl = TAX * (kW_value + kWh_value)
@@ -320,7 +311,8 @@ def run_optimization(
                 "battery_level_kWh": round(pulp.value(battery_soc[i + 1]), 2),
                 "charge_kWh": round(c_val * half_power_kWh, 3) if act == "charge" else 0,
                 "discharge_kWh": round(effective_kwh, 3) if act == "discharge" else 0,
-                "EPRX3_kWh": round(half_power_kWh, 3) if act == "eprx3" else 0,
+                # EPRX3の場合、ロス分を差し引いた effective_kwh を記録
+                "EPRX3_kWh": round(effective_kwh, 3) if act == "eprx3" else 0,
                 "loss_kWh": round(loss_kwh, 3),
                 "JEPX_actual": round(j_a, 3),
                 "EPRX1_actual": round(e1_a, 3),
@@ -374,10 +366,8 @@ def generate_monthly_summary(
     """
     月別に取引結果を集計し、各項目（充放電量、ロス、収益など）を
     四捨五入した整数値でまとめたDataFrameを返す。
+    ただし、_price の項目は小数点以下2位まで表記する。
     """
-    import pandas as pd
-    from src.config import WHEELING_DATA, RENEWABLE_ENERGY_SURCHARGE
-
     df = pd.DataFrame(transactions)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["month"] = df["date"].dt.to_period("M").astype(str)
@@ -386,8 +376,8 @@ def generate_monthly_summary(
     for month, group in df.groupby("month"):
         monthly_charge = group[group["action"] == "charge"]["charge_kWh"].sum()
         effective_discharge = (
-                group[group["action"] == "discharge"]["discharge_kWh"].sum() +
-                group[group["action"] == "eprx3"]["EPRX3_kWh"].sum()
+            group[group["action"] == "discharge"]["discharge_kWh"].sum() +
+            group[group["action"] == "eprx3"]["EPRX3_kWh"].sum()
         )
         total_loss = group["loss_kWh"].sum()
         monthly_total_pnl = group["Total_Daily_PnL"].sum()
@@ -435,10 +425,10 @@ def generate_monthly_summary(
             "Total_Wheeling_Usage_Fee": round(monthly_wheeling_fee),
             "Total_Renewable_Energy_Surcharge": round(monthly_renewable_energy_surcharge),
             "Action_Counts": action_counts_str,
-            "Average_Charge_Price": round(avg_charge_price) if avg_charge_price is not None else None,
-            "Average_Discharge_Price": round(avg_discharge_price) if avg_discharge_price is not None else None,
-            "Average_EPRX3_Price": round(avg_eprx3_price) if avg_eprx3_price is not None else None,
-            "Average_EPRX1_Price": round(avg_eprx1_price) if avg_eprx1_price is not None else None,
+            "Average_Charge_Price": round(avg_charge_price, 2) if avg_charge_price is not None else None,
+            "Average_Discharge_Price": round(avg_discharge_price, 2) if avg_discharge_price is not None else None,
+            "Average_EPRX3_Price": round(avg_eprx3_price, 2) if avg_eprx3_price is not None else None,
+            "Average_EPRX1_Price": round(avg_eprx1_price, 2) if avg_eprx1_price is not None else None,
         })
 
     return pd.DataFrame(summary_list)
