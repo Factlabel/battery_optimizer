@@ -40,15 +40,12 @@ def main():
     max_daily_eprx1_slots = st.number_input("1日のEPRX1スロット最大数 (0=制限なし)", min_value=0, value=6, step=1)
 
     st.subheader("CSVテンプレートのダウンロード")
-    csv_template = (
-        "date,slot,JEPX_prediction,JEPX_actual,EPRX1_prediction,EPRX3_prediction,EPRX1_actual,EPRX3_actual,imbalance\n"
-        "2023/4/1,1,6.19,10.5,19.5,0.34,19.5,0.34,10.5\n"
-    )
-
+    with open("assets/csv_template_sample.csv", "r", encoding="utf-8") as f:
+        csv_template = f.read()
     st.download_button(
         label="ダウンロード",
         data=csv_template,
-        file_name="csv_template.csv",
+        file_name="csv_template_sample.csv",
         mime="text/csv"
     )
 
