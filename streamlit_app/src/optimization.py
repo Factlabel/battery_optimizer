@@ -233,8 +233,18 @@ def run_optimization(
             profit_terms.append(slot_profit)
         prob += pulp.lpSum(profit_terms)
 
-        solver = pulp.PULP_CBC_CMD(msg=0, threads=4)
-        prob.solve(solver)
+        # CBCの代替としてCOIN_CMDを使用（macOS互換性向上）
+        try:
+            solver = pulp.COIN_CMD(msg=0)
+            prob.solve(solver)
+        except:
+            # フォールバック: HiGHSまたは他の利用可能なソルバーを試す
+            try:
+                solver = pulp.HiGHS_CMD(msg=0)
+                prob.solve(solver)
+            except:
+                # 最後の手段としてデフォルトソルバーを使用
+                prob.solve()
         if pulp.LpStatus[prob.status] != "Optimal":
             continue
 

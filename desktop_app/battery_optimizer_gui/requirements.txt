@@ -1,0 +1,24 @@
+# PyQt6 Battery Optimizer - Dependencies
+# Core GUI Framework
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+
+# Scientific Computing & Optimization
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+PuLP>=2.7.0
+
+# Data Processing
+openpyxl>=3.1.0  # Excel file support
+xlrd>=2.0.0      # Legacy Excel support
+
+# Utilities
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# Development & Testing (optional)
+pytest>=7.4.0
+pytest-qt>=4.2.0
+black>=23.0.0
+flake8>=6.0.0 
