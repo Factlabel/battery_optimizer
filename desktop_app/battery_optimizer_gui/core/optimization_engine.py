@@ -93,7 +93,7 @@ class OptimizationEngine(QThread):
             self.optimization_failed.emit(error_msg)
     
     def _validate_input_data(self):
-        """Validate input data and parameters"""
+        """Validate input data and parameters with enhanced checks"""
         if self.price_data is None or self.price_data.empty:
             raise ValueError("価格データが設定されていません")
             
@@ -107,9 +107,216 @@ class OptimizationEngine(QThread):
         
         missing_cols = required_cols - set(self.price_data.columns)
         if missing_cols:
-            raise ValueError(f"必須列が不足しています: {missing_cols}")
+            # Check if we have critical columns at least
+            critical_cols = {"date", "slot", "JEPX_prediction"}
+            missing_critical = critical_cols - set(self.price_data.columns)
             
-        self.log_updated.emit("入力データの検証が完了しました")
+            if missing_critical:
+                raise ValueError(f"重要な列が不足しています: {missing_critical}")
+            else:
+                # Warn about missing non-critical columns and provide defaults
+                self.log_updated.emit(f"⚠️ 一部の列が不足していますが、デフォルト値で補完します: {missing_cols}")
+                
+                # Add missing columns with default values
+                if "JEPX_actual" not in self.price_data.columns:
+                    self.price_data["JEPX_actual"] = self.price_data["JEPX_prediction"]
+                    self.log_updated.emit("📝 JEPX_actual をJEPX_predictionからコピーしました")
+                
+                if "EPRX1_prediction" not in self.price_data.columns:
+                    self.price_data["EPRX1_prediction"] = 0
+                    self.log_updated.emit("📝 EPRX1_prediction にデフォルト値(0)を設定しました")
+                
+                if "EPRX1_actual" not in self.price_data.columns:
+                    self.price_data["EPRX1_actual"] = self.price_data.get("EPRX1_prediction", 0)
+                    self.log_updated.emit("📝 EPRX1_actual をEPRX1_predictionからコピーしました")
+                
+                if "EPRX3_prediction" not in self.price_data.columns:
+                    self.price_data["EPRX3_prediction"] = 0
+                    self.log_updated.emit("📝 EPRX3_prediction にデフォルト値(0)を設定しました")
+                
+                if "EPRX3_actual" not in self.price_data.columns:
+                    self.price_data["EPRX3_actual"] = self.price_data.get("EPRX3_prediction", 0)
+                    self.log_updated.emit("📝 EPRX3_actual をEPRX3_predictionからコピーしました")
+                
+                if "imbalance" not in self.price_data.columns:
+                    self.price_data["imbalance"] = self.price_data.get("JEPX_actual", self.price_data["JEPX_prediction"])
+                    self.log_updated.emit("📝 imbalance をJEPX価格からコピーしました")
+        
+        # Log original data shape
+        original_rows = len(self.price_data)
+        self.log_updated.emit(f"📊 元データ: {original_rows}行, {len(self.price_data.columns)}列")
+        
+        # 1. Remove rows where any required column has NaN values
+        self.log_updated.emit("🧹 Step 1: NaN値を含む行を除去中...")
+        clean_mask = pd.notna(self.price_data[list(required_cols)]).all(axis=1)
+        clean_data = self.price_data[clean_mask].copy()
+        
+        removed_rows = original_rows - len(clean_data)
+        if removed_rows > 0:
+            self.log_updated.emit(f"⚠️ {removed_rows}行を除去しました (NaN値を含む行)")
+        
+        if clean_data.empty:
+            raise ValueError("有効なデータがありません（全行にNaN値が含まれています）")
+        
+        # Reset index after cleaning
+        clean_data = clean_data.reset_index(drop=True)
+        
+        # 2. Data type conversion and validation
+        self.log_updated.emit("🔧 Step 2: データ型を正規化中...")
+        numeric_cols = [
+            "slot", "JEPX_prediction", "JEPX_actual",
+            "EPRX1_prediction", "EPRX3_prediction", 
+            "EPRX1_actual", "EPRX3_actual", "imbalance"
+        ]
+        
+        for col in numeric_cols:
+            if col in clean_data.columns:
+                original_values = clean_data[col].copy()
+                clean_data[col] = pd.to_numeric(clean_data[col], errors='coerce')
+                
+                # Check if conversion introduced new NaNs
+                new_nans = pd.isna(clean_data[col]).sum() - pd.isna(original_values).sum()
+                if new_nans > 0:
+                    self.log_updated.emit(f"⚠️ {col}: {new_nans}個の値が数値変換できませんでした")
+                
+                # If all values became NaN, try to recover or use defaults
+                if pd.isna(clean_data[col]).all():
+                    self.log_updated.emit(f"❌ {col}: 全ての値が数値変換に失敗しました")
+                    if col == "slot":
+                        # Try to generate slot numbers if they're all invalid
+                        clean_data[col] = range(1, len(clean_data) + 1)
+                        self.log_updated.emit(f"🔧 {col}: 連番で自動生成しました")
+                    elif col in ["JEPX_prediction", "JEPX_actual"]:
+                        # For price columns, this is more serious
+                        raise ValueError(f"{col}の数値変換が全て失敗しました。データの形式を確認してください。")
+                    else:
+                        # For other columns, use 0 as default
+                        clean_data[col] = 0
+                        self.log_updated.emit(f"🔧 {col}: デフォルト値(0)で補完しました")
+        
+        # Remove rows that got NaN during conversion (only for critical columns)
+        critical_numeric_cols = ["slot", "JEPX_prediction", "JEPX_actual"]
+        available_critical = [col for col in critical_numeric_cols if col in clean_data.columns]
+        
+        if available_critical:
+            before_conversion_filter = len(clean_data)
+            final_clean_mask = pd.notna(clean_data[available_critical]).all(axis=1)
+            clean_data = clean_data[final_clean_mask].reset_index(drop=True)
+            removed_conversion = before_conversion_filter - len(clean_data)
+            if removed_conversion > 0:
+                self.log_updated.emit(f"🗑️ 重要カラムの数値変換失敗により{removed_conversion}行を削除")
+        
+        # 3. Slot validation
+        self.log_updated.emit("🎯 Step 3: スロット番号を検証中...")
+        if 'slot' in clean_data.columns:
+            clean_data['slot'] = clean_data['slot'].astype(int)
+            
+            # Check slot range (should be 1-48 for half-hourly data)
+            min_slot = clean_data['slot'].min()
+            max_slot = clean_data['slot'].max()
+            unique_slots = sorted(clean_data['slot'].unique())
+            
+            self.log_updated.emit(f"📈 スロット範囲: {min_slot}-{max_slot} (ユニーク値: {len(unique_slots)}個)")
+            
+            if min_slot < 1 or max_slot > 48:
+                self.log_updated.emit(f"⚠️ 異常なスロット値を検出: 範囲 {min_slot}-{max_slot}")
+                # Filter to valid slot range
+                valid_slot_mask = (clean_data['slot'] >= 1) & (clean_data['slot'] <= 48)
+                before_filter = len(clean_data)
+                clean_data = clean_data[valid_slot_mask].reset_index(drop=True)
+                after_filter = len(clean_data)
+                if before_filter != after_filter:
+                    self.log_updated.emit(f"⚠️ {before_filter - after_filter}行を除去 (無効なスロット番号)")
+        
+        # 4. Date validation and formatting
+        self.log_updated.emit("📅 Step 4: 日付を検証中...")
+        if 'date' in clean_data.columns:
+            try:
+                # Try multiple date formats
+                date_formats = ['%Y/%m/%d', '%Y-%m-%d', '%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S']
+                parsed_dates = None
+                
+                for fmt in date_formats:
+                    try:
+                        parsed_dates = pd.to_datetime(clean_data['date'], format=fmt, errors='coerce')
+                        if not parsed_dates.isna().all():
+                            break
+                    except:
+                        continue
+                
+                if parsed_dates is None:
+                    parsed_dates = pd.to_datetime(clean_data['date'], errors='coerce')
+                
+                # Remove rows where date conversion failed
+                valid_date_mask = pd.notna(parsed_dates)
+                if not valid_date_mask.all():
+                    invalid_dates = (~valid_date_mask).sum()
+                    self.log_updated.emit(f"⚠️ {invalid_dates}行の日付が無効でした")
+                    clean_data = clean_data[valid_date_mask].reset_index(drop=True)
+                    parsed_dates = parsed_dates[valid_date_mask].reset_index(drop=True)
+                
+                # Convert to standard format
+                clean_data['date'] = parsed_dates.dt.strftime('%Y-%m-%d')
+                
+                # Log date range
+                date_range = f"{parsed_dates.min().strftime('%Y-%m-%d')} ～ {parsed_dates.max().strftime('%Y-%m-%d')}"
+                days_count = (parsed_dates.max() - parsed_dates.min()).days + 1
+                self.log_updated.emit(f"📅 期間: {date_range} ({days_count}日間)")
+                
+            except Exception as e:
+                self.log_updated.emit(f"⚠️ 日付変換エラー: {str(e)}")
+        
+        # 5. Price data validation
+        self.log_updated.emit("💰 Step 5: 価格データを検証中...")
+        price_cols = ['JEPX_prediction', 'JEPX_actual', 'EPRX1_prediction', 
+                     'EPRX1_actual', 'EPRX3_prediction', 'EPRX3_actual']
+        
+        for col in price_cols:
+            if col in clean_data.columns:
+                values = clean_data[col]
+                min_val = values.min()
+                max_val = values.max()
+                mean_val = values.mean()
+                
+                # Check for negative values (warning but don't remove)
+                negative_count = (values < 0).sum()
+                if negative_count > 0:
+                    self.log_updated.emit(f"⚠️ {col}: {negative_count}個の負の値を検出")
+                
+                # Check for extremely high values (potential outliers)
+                q99 = values.quantile(0.99)
+                extreme_count = (values > q99 * 10).sum()  # More than 10x the 99th percentile
+                if extreme_count > 0:
+                    self.log_updated.emit(f"⚠️ {col}: {extreme_count}個の極端な値を検出 (99%値の10倍以上)")
+                
+                self.log_updated.emit(f"📊 {col}: min={min_val:.2f}, max={max_val:.2f}, mean={mean_val:.2f}")
+        
+        # 6. Data completeness check
+        self.log_updated.emit("📋 Step 6: データ完全性をチェック中...")
+        final_rows = len(clean_data)
+        
+        if final_rows < 1:  # At least one row of data
+            raise ValueError(f"データが不足しています（{final_rows}行）。最低1行のデータが必要です。")
+        
+        if final_rows < 24:  # Less than one day of data
+            self.log_updated.emit(f"⚠️ データが少なめです（{final_rows}行）。24スロット（1日分）未満のデータです。")
+        
+        # Check for date-slot completeness
+        if 'date' in clean_data.columns and 'slot' in clean_data.columns:
+            unique_dates = clean_data['date'].nunique()
+            expected_slots_per_day = 48  # Half-hourly data
+            total_expected = unique_dates * expected_slots_per_day
+            completeness_ratio = final_rows / total_expected
+            
+            self.log_updated.emit(f"📈 データ完全性: {final_rows}/{total_expected} = {completeness_ratio:.1%}")
+            
+            if completeness_ratio < 0.5:  # Less than 50% complete
+                self.log_updated.emit("⚠️ データの完全性が低いです（50%未満）- 結果の精度に影響する可能性があります")
+        
+        # 7. Update the cleaned data
+        self.price_data = clean_data
+        self.log_updated.emit(f"✅ 最終データ: {final_rows}行 (元の{final_rows/original_rows:.1%})")
+        self.log_updated.emit("🎉 入力データの検証とクリーニングが完了しました")
     
     def _get_wheeling_data(self, area_name: str, voltage_type: str) -> Dict:
         """Get wheeling data for the specified area and voltage type"""
@@ -498,24 +705,24 @@ class OptimizationEngine(QThread):
             
             result = {
                 'date': row['date'],
-                'slot': int(row['slot']),
+                'slot': int(row['slot']) if not pd.isna(row['slot']) else 0,
                 'action': action,
                 'battery_level_kWh': round(current_soc, 2),
                 'charge_kWh': round(c_kwh, 3) if action == "charge" else 0,
                 'discharge_kWh': round(effective_kwh, 3) if action == "discharge" else 0,
                 'EPRX3_kWh': round(effective_kwh, 3) if action == "eprx3" else 0,
                 'loss_kWh': round(loss_kwh, 3),
-                'JEPX_actual': round(j_a, 3),
-                'EPRX1_actual': round(e1_a, 3),
-                'EPRX3_actual': round(e3_a, 3),
-                'imbalance': round(imb_a, 3),
+                'JEPX_actual': round(j_a, 3) if not pd.isna(j_a) else 0.0,
+                'EPRX1_actual': round(e1_a, 3) if not pd.isna(e1_a) else 0.0,
+                'EPRX3_actual': round(e3_a, 3) if not pd.isna(e3_a) else 0.0,
+                'imbalance': round(imb_a, 3) if not pd.isna(imb_a) else 0.0,
                 'JEPX_PnL': pnl_data['JEPX_PnL'],
                 'EPRX1_PnL': pnl_data['EPRX1_PnL'],
                 'EPRX3_PnL': pnl_data['EPRX3_PnL'],
                 'Total_Daily_PnL': pnl_data['Total_Daily_PnL'],
-                'JEPX_prediction': row.get('JEPX_prediction', 0),
-                'EPRX1_prediction': row.get('EPRX1_prediction', 0),
-                'EPRX3_prediction': row.get('EPRX3_prediction', 0)
+                'JEPX_prediction': row.get('JEPX_prediction', 0) if not pd.isna(row.get('JEPX_prediction', 0)) else 0.0,
+                'EPRX1_prediction': row.get('EPRX1_prediction', 0) if not pd.isna(row.get('EPRX1_prediction', 0)) else 0.0,
+                'EPRX3_prediction': row.get('EPRX3_prediction', 0) if not pd.isna(row.get('EPRX3_prediction', 0)) else 0.0
             }
             
             day_results.append(result)
