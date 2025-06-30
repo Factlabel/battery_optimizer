@@ -23,13 +23,18 @@
 - **Revenue Details**: 4種類の収益分析グラフ（時間別・市場別・アクション別・日別）
 - **Intelligent Chat**: 文脈を理解したAI分析アシスタント
 - **Error Reporting**: 自動エラー報告システム
+- **データ送信デバッグ機能**: 託送料金・損失率データ管理
 
 ### 📊 **新しいタブ構成**
-- **Graphs**: 従来の可視化（JEPX価格・SoC・充放電量）
-- **Revenue Details**: 収益分析専用タブ（NEW!）
-- **Data**: データテーブル表示
-- **Summary**: 最適化サマリー
+
+v2.1では以下の6つのタブでより豊富な機能を提供:
+
+- **Graphs**: バッテリー残量とJEPX価格（期間選択機能付き）
+- **Revenue Details**: 4種類の収益分析グラフ
+- **Data**: 詳細な最適化結果を表形式で表示
+- **Summary**: 総利益や統計情報を表示
 - **AI Chat**: GPT-4o分析チャット（NEW!）
+- **託送料金・損失率**: データ管理・編集（NEW!）
 
 ## 🚀 超簡単クイックスタート
 
@@ -247,10 +252,11 @@ pip install -r requirements.txt --upgrade
 - **自動データ品質検証**
 
 ### 結果表示
-- **5タブインターフェース**: Graphs, Revenue Details, Data, Summary, AI Chat
+- **6タブインターフェース**: Graphs, Revenue Details, Data, Summary, AI Chat, 託送料金・損失率
 - **Revenue Details**: 時間別・市場別・アクション別・日別分析
 - **フィルタ・ソート機能**
 - **NEW!** 日付範囲による動的フィルタリング
+- **NEW!** 託送料金・損失率データの表示・編集機能
 
 ### AI機能
 - **GPT-4o分析**: 最適化結果の詳細解析
@@ -292,6 +298,8 @@ pip install -r requirements.txt --upgrade
    - Revenue Details専用タブ追加
    - インテリジェントチャットボット
    - 自動エラー報告システム
+   - データ送信デバッグ機能
+   - 託送料金・損失率データ管理
 
 3. **📊 UI/UX向上**:
    - 5タブインターフェース（Graphs, Revenue Details, Data, Summary, AI Chat）
@@ -321,3 +329,33 @@ pip install -r requirements.txt --upgrade
 **⬆️ [メインプロジェクト](../README.md)に戻る** 
 
 **🏢 Factlabel** | © 2024 | **v2.1 - Critical Fix & AI Integration** 🤖 
+
+## ✨ 主要機能
+
+### 蓄電池最適化
+- **Linear Programming**: PuLP最適化エンジン使用
+- **Multi-Action Strategy**: charge/discharge/EPRX1/EPRX3/idle
+- **Cycle Constraints**: 日次・年次サイクル制限
+- **Real-time Optimization**: 30分単位の高精度制御
+
+### データ管理
+- **ネイティブファイルダイアログ**
+- **ドラッグ&ドロップ対応**
+- **複数エンコーディング対応** (UTF-8, Shift_JIS, CP932, EUC-JP)
+- **自動データ品質検証**
+- **託送料金・損失率データの表示・編集**（NEW!）
+
+### 結果表示
+- **6タブインターフェース**: Graphs, Revenue Details, Data, Summary, AI Chat, 託送料金・損失率
+- **Revenue Details**: 時間別・市場別・アクション別・日別分析
+- **フィルタ・ソート機能**
+- **NEW!** 日付範囲による動的フィルタリング
+- **NEW!** 託送料金・損失率データの表示・編集機能
+
+### 託送料金・損失率データ管理（NEW!）
+- **全国9エリア対応**: 北海道〜九州の全エリアデータ
+- **3電圧区分対応**: 特高圧（SHV）・高圧（HV）・低圧（LV）
+- **リアルタイム編集**: ダブルクリックで値を直接編集
+- **データ管理**: 保存・復元・再読み込み機能
+- **即座反映**: 変更は次回最適化実行時から自動適用
+- **再エネ賦課金設定**: 全国一律の賦課金単価も変更可能 

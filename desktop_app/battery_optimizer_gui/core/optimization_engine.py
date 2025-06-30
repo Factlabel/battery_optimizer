@@ -320,12 +320,25 @@ class OptimizationEngine(QThread):
     
     def _get_wheeling_data(self, area_name: str, voltage_type: str) -> Dict:
         """Get wheeling data for the specified area and voltage type"""
-        # Import the config data (should be moved to a separate config module)
-        from config.area_config import WHEELING_DATA
-        
-        wheeling_data = WHEELING_DATA["areas"].get(area_name, {}).get(voltage_type, {})
+        # Check if parent window has modified wheeling data
+        if hasattr(self.parent(), 'get_current_wheeling_data'):
+            wheeling_data_source = self.parent().get_current_wheeling_data()
+            wheeling_data = wheeling_data_source["areas"].get(area_name, {}).get(voltage_type, {})
+            self.log_updated.emit(f"📊 使用データ: UI修正データ ({area_name} {voltage_type})")
+        else:
+            # Fallback to config file
+            from config.area_config import WHEELING_DATA
+            wheeling_data = WHEELING_DATA["areas"].get(area_name, {}).get(voltage_type, {})
+            self.log_updated.emit(f"📊 使用データ: 設定ファイル ({area_name} {voltage_type})")
+            
         if not wheeling_data:
             raise ValueError(f"エリア '{area_name}' の電圧区分 '{voltage_type}' のデータが見つかりません")
+            
+        # Log the data being used
+        loss_rate = wheeling_data.get("loss_rate", 0.0)
+        base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
+        usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
+        self.log_updated.emit(f"📊 {area_name} {voltage_type}: 損失率{loss_rate*100:.2f}%, 基本{base_charge:.2f}円/kW, 使用料{usage_fee:.2f}円/kWh")
             
         return wheeling_data
     
@@ -809,11 +822,16 @@ class OptimizationEngine(QThread):
         
         # Calculate monthly fees
         battery_power_kW = params['battery_power_kW']
-        wheeling_basic_fee = wheeling_data.get("wheeling_base_charge", 0) * battery_power_kW
+        wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0) * battery_power_kW
         wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0) * total_loss_kWh
-        renewable_energy_surcharge = 3.49 * total_loss_kWh  # Fixed rate
         
-        final_profit = total_daily_pnl - wheeling_basic_fee - wheeling_usage_fee - renewable_energy_surcharge
+        # Use modified renewable energy surcharge if available
+        if hasattr(self.parent(), 'get_current_surcharge'):
+            renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss_kWh
+        else:
+            renewable_energy_surcharge = 3.49 * total_loss_kWh  # Fixed rate
+        
+        final_profit = total_daily_pnl - wheeling_base_charge - wheeling_usage_fee - renewable_energy_surcharge
         
         summary = {
             'Total_Charge_kWh': total_charge_kWh,
@@ -821,7 +839,7 @@ class OptimizationEngine(QThread):
             'Total_Loss_kWh': total_loss_kWh,
             'Total_EPRX3_kWh': total_eprx3_kWh,
             'Total_Daily_PnL': total_daily_pnl,
-            'Wheeling_Basic_Fee': wheeling_basic_fee,
+            'Wheeling_Basic_Fee': wheeling_base_charge,
             'Wheeling_Usage_Fee': wheeling_usage_fee,
             'Renewable_Energy_Surcharge': renewable_energy_surcharge,
             'Final_Profit': final_profit,
@@ -862,8 +880,13 @@ class OptimizationEngine(QThread):
             wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
             wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
             monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
-            monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
-
+            
+            # Use modified renewable energy surcharge if available
+            if hasattr(self.parent(), 'get_current_surcharge'):
+                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss
+            else:
+                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
+            
             action_counts = group["action"].value_counts().to_dict()
             action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
 

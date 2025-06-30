@@ -222,51 +222,105 @@ class ChatBotWorker(QThread):
             # Convert optimization data to JSON serializable format
             serializable_data = convert_numpy_types(self.optimization_data) if self.optimization_data else None
             
-            # Create comprehensive system prompt emphasizing full data usage
+            # Create comprehensive and readable data summary for AI
             optimization_info = ""
             if serializable_data:
                 total_rows = serializable_data.get('total_rows', 0)
                 date_range_full = serializable_data.get('date_range_full', '不明')
                 current_filter = serializable_data.get('current_display_filter', '不明')
                 stats = serializable_data.get('data_statistics', {})
+                summary = serializable_data.get('summary', {})
+                
+                # Format summary data in a more readable way
+                summary_text = "\n【基本収益情報】\n"
+                for key, value in summary.items():
+                    if isinstance(value, (int, float)):
+                        if 'Profit' in key or 'Fee' in key:
+                            summary_text += f"• {key}: ¥{value:,.0f}\n"
+                        elif 'kWh' in key:
+                            summary_text += f"• {key}: {value:,.1f} kWh\n"
+                        else:
+                            summary_text += f"• {key}: {value:,.2f}\n"
+                    else:
+                        summary_text += f"• {key}: {value}\n"
+                
+                # Format revenue analysis
+                revenue_analysis = stats.get('revenue_analysis', {})
+                revenue_text = "\n【詳細収益分析】\n"
+                if revenue_analysis:
+                    revenue_text += f"• 総収益: ¥{revenue_analysis.get('total_revenue', 0):,.0f}\n"
+                    revenue_text += f"• 平均スロット収益: ¥{revenue_analysis.get('average_slot_revenue', 0):,.0f}\n"
+                    revenue_text += f"• 最大スロット収益: ¥{revenue_analysis.get('max_slot_revenue', 0):,.0f}\n"
+                    revenue_text += f"• 最小スロット収益: ¥{revenue_analysis.get('min_slot_revenue', 0):,.0f}\n"
+                    revenue_text += f"• 利益スロット数: {revenue_analysis.get('profitable_slots', 0):,}\n"
+                    revenue_text += f"• 損失スロット数: {revenue_analysis.get('loss_slots', 0):,}\n"
+                    revenue_text += f"• JEPX収益: ¥{revenue_analysis.get('jepx_total', 0):,.0f}\n"
+                    revenue_text += f"• EPRX1収益: ¥{revenue_analysis.get('eprx1_total', 0):,.0f}\n"
+                    revenue_text += f"• EPRX3収益: ¥{revenue_analysis.get('eprx3_total', 0):,.0f}\n"
+                
+                # Format date info
+                date_info = stats.get('date_info', {})
+                date_text = "\n【期間情報】\n"
+                if date_info:
+                    date_text += f"• 開始日: {date_info.get('start_date', '不明')}\n"
+                    date_text += f"• 終了日: {date_info.get('end_date', '不明')}\n"
+                    date_text += f"• 総日数: {date_info.get('total_days', 0)}日\n"
+                    date_text += f"• データ日数: {date_info.get('unique_dates', 0)}日\n"
+                
+                # Format action analysis
+                action_analysis = stats.get('action_analysis', {})
+                action_text = "\n【運用パターン分析】\n"
+                if action_analysis:
+                    action_dist = action_analysis.get('action_distribution', {})
+                    for action, count in action_dist.items():
+                        action_text += f"• {action}: {count:,}回\n"
+                    action_text += f"• 最頻アクション: {action_analysis.get('most_common_action', '不明')}\n"
+                
+                # Format energy analysis
+                energy_analysis = stats.get('energy_analysis', {})
+                energy_text = "\n【エネルギー分析】\n"
+                for key, value in energy_analysis.items():
+                    if 'total' in key:
+                        energy_text += f"• {key}: {value:,.1f} kWh\n"
                 
                 optimization_info = f"""
-📊 **重要**: 分析対象データについて
-- あなたは全期間データ（{total_rows:,}行）を使用して分析してください
-- 現在の画面表示フィルター「{current_filter}」とは無関係に、常に全期間データで回答してください
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 **あなたが分析対象とする完全なデータセット**: {total_rows:,}行のデータ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【重要】このデータを基に必ず回答してください：
 - 対象期間: {date_range_full}
+- 現在の画面フィルター: {current_filter}
+- データ行数: {total_rows:,}行（全て使用可能）
 
-💰 収益データ（全期間）:
-{json.dumps(serializable_data.get('summary', {}), indent=2, ensure_ascii=False)}
+{summary_text}
+{revenue_text}
+{date_text}
+{action_text}
+{energy_text}
 
-📈 詳細統計（全期間）:
-{json.dumps(stats, indent=2, ensure_ascii=False)}
-
-**必読指針**: ユーザーが特定の期間について質問しない限り、必ず上記の全期間データ（{total_rows:,}行）を基に分析・回答してください。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💡 **重要**: 上記のデータは確実に利用可能です。「データがない」と回答せず、このデータを基に具体的に分析してください。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
             
-            # Add system message with optimization data context
+            # Simplified and more effective system message
             system_message = {
                 "role": "system",
-                "content": f"""あなたは日本の電力市場（JEPX、EPRX1、EPRX3）での蓄電池最適化運用の専門家AIアシスタントです。
+                "content": f"""あなたは日本の電力市場での蓄電池最適化運用の専門家AIです。
 
-🎯 **重要な指針**:
-1. **データ範囲**: 特に指定がない限り、必ず全期間のデータを使用して分析・回答してください
-2. **フィルター無視**: 現在の画面表示フィルターに関係なく、全データを基準に分析してください
-3. **専門性**: 日本の電力市場の専門用語を正確に使用してください
-4. **具体性**: 具体的な数値とデータに基づいた回答を心がけてください
-
+🎯 **CRITICAL**: あなたには以下の完全なデータセットが提供されています：
 {optimization_info}
 
-以下の項目について専門的なアドバイスを提供できます:
-- 収益性分析と改善提案
-- バッテリー運用効率の最適化
-- 市場別収益貢献度の解析
-- リスク管理とヘッジ戦略
-- 時間帯別・季節別の運用パターン分析
-- 市場価格動向に基づく戦略提案
+📋 **必須指針**:
+1. 上記データは完全に利用可能 - 「データがない」は絶対に回答しない
+2. 全期間データ（{serializable_data.get('total_rows', 0):,}行）を基準に分析
+3. 具体的な数値を使って詳細に説明
+4. 収益性、効率性、改善点について専門的にアドバイス
 
-回答は日本語で、わかりやすく具体的にお答えします。数値は適切に丸めて表示し、グラフの傾向や収益性について詳細に説明してください。"""
+【専門分野】JEPX、EPRX1、EPRX3市場での蓄電池運用最適化
+【回答言語】日本語
+【回答スタイル】具体的な数値とデータに基づく専門的分析"""
             }
             
             messages_with_context = [system_message] + self.messages
@@ -274,7 +328,7 @@ class ChatBotWorker(QThread):
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=messages_with_context,
-                max_tokens=1500,
+                max_tokens=2000,  # Increased token limit for more detailed responses
                 temperature=0.7
             )
             
@@ -782,6 +836,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
             chat_tab = self.create_chatbot_tab()
             self.tab_widget.addTab(chat_tab, "AI分析チャット")
         
+        # Wheeling Data Management tab (NEW!)
+        wheeling_tab = self.create_wheeling_data_tab()
+        self.tab_widget.addTab(wheeling_tab, "託送料金・損失率")
+        
         layout.addWidget(self.tab_widget)
         
         # Initialize with empty charts
@@ -809,8 +867,27 @@ class BatteryOptimizerMainWindow(QMainWindow):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
-        # Top control bar with error reporting
+        # Top control bar with error reporting and data debug
         top_control_layout = QHBoxLayout()
+        
+        # Data debug button (NEW!)
+        debug_data_btn = QPushButton("📊 送信データ確認")
+        debug_data_btn.clicked.connect(self.show_ai_data_debug)
+        debug_data_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17A2B8;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        debug_data_btn.setToolTip("AIに送信されるデータ内容を確認")
+        top_control_layout.addWidget(debug_data_btn)
         
         # Error reporting button
         error_report_btn = QPushButton("🐛 問題報告")
@@ -2414,8 +2491,23 @@ class BatteryOptimizerMainWindow(QMainWindow):
             }
             
             self.add_log_message(f"🤖 AI用データ準備完了: 全{len(all_results)}行のデータを送信")
+            self.add_log_message(f"🤖 サマリーキー数: {len(optimization_context['summary'])}個")
+            self.add_log_message(f"🤖 統計データ準備: {len(optimization_context['data_statistics'])}カテゴリ")
+            
+            # Log key statistics for debugging
+            if optimization_context['data_statistics']:
+                revenue_stats = optimization_context['data_statistics'].get('revenue_analysis', {})
+                if revenue_stats:
+                    total_revenue = revenue_stats.get('total_revenue', 0)
+                    self.add_log_message(f"🤖 総収益データ: ¥{total_revenue:,.0f}")
         else:
             self.add_log_message("🤖 最適化結果がないため、AIにデータを送信しません")
+            QMessageBox.warning(self, "データ未準備", "最適化結果がありません。\nまず最適化を実行してからAI分析をご利用ください。")
+            # Re-enable input
+            self.chat_input.setEnabled(True)
+            self.send_button.setEnabled(True)
+            self.send_button.setText("送信")
+            return
         
         # Start chatbot worker
         self.chatbot_worker = ChatBotWorker(
@@ -3013,3 +3105,502 @@ OS: {self.get_system_info()}
         except Exception as e:
             self.add_log_message(f"API キー保存エラー: {e}")
             return False
+    
+    def show_ai_data_debug(self):
+        """Show AI data debug dialog"""
+        if not self.optimization_results:
+            QMessageBox.warning(self, "データ未準備", "最適化結果がありません。\nまず最適化を実行してからご利用ください。")
+            return
+        
+        # Create debug dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("AI送信データ詳細")
+        dialog.setModal(True)
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title = QLabel("AIに送信されるデータ内容")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Create tab widget for different data views
+        tab_widget = QTabWidget()
+        
+        # Summary data tab
+        summary_tab = QWidget()
+        summary_layout = QVBoxLayout(summary_tab)
+        summary_text = QPlainTextEdit()
+        summary_text.setReadOnly(True)
+        summary_text.setFont(QFont("Monaco", 10))
+        
+        # Prepare the data that would be sent to AI
+        all_results = self.optimization_results.get("results", [])
+        optimization_context = {
+            "summary": self.optimization_results.get("summary", {}),
+            "total_rows": len(all_results),
+            "date_range_full": "全期間" if all_results else "データなし",
+            "current_display_filter": self.get_date_range_title(),
+            "data_statistics": self._generate_ai_context_stats(all_results) if all_results else {}
+        }
+        
+        # Format summary info
+        summary_info = "【基本サマリー】\n"
+        for key, value in optimization_context['summary'].items():
+            if isinstance(value, (int, float)):
+                if 'Profit' in key or 'Fee' in key:
+                    summary_info += f"{key}: ¥{value:,.0f}\n"
+                elif 'kWh' in key:
+                    summary_info += f"{key}: {value:,.1f} kWh\n"
+                else:
+                    summary_info += f"{key}: {value:,.2f}\n"
+            else:
+                summary_info += f"{key}: {value}\n"
+        
+        summary_text.setPlainText(summary_info)
+        summary_layout.addWidget(summary_text)
+        tab_widget.addTab(summary_tab, "サマリー")
+        
+        # Statistics data tab
+        stats_tab = QWidget()
+        stats_layout = QVBoxLayout(stats_tab)
+        stats_text = QPlainTextEdit()
+        stats_text.setReadOnly(True)
+        stats_text.setFont(QFont("Monaco", 10))
+        
+        # Format statistics
+        stats_info = f"【データ統計】\nデータ行数: {optimization_context['total_rows']:,}行\n\n"
+        stats_dict = optimization_context.get('data_statistics', {})
+        
+        if stats_dict:
+            # Revenue analysis
+            revenue_analysis = stats_dict.get('revenue_analysis', {})
+            if revenue_analysis:
+                stats_info += "【収益分析】\n"
+                for key, value in revenue_analysis.items():
+                    if isinstance(value, (int, float)):
+                        if 'revenue' in key.lower() or 'total' in key.lower():
+                            stats_info += f"{key}: ¥{value:,.0f}\n"
+                        else:
+                            stats_info += f"{key}: {value:,}\n"
+                    else:
+                        stats_info += f"{key}: {value}\n"
+                stats_info += "\n"
+            
+            # Date info
+            date_info = stats_dict.get('date_info', {})
+            if date_info:
+                stats_info += "【期間情報】\n"
+                for key, value in date_info.items():
+                    stats_info += f"{key}: {value}\n"
+                stats_info += "\n"
+            
+            # Action analysis
+            action_analysis = stats_dict.get('action_analysis', {})
+            if action_analysis:
+                stats_info += "【アクション分析】\n"
+                action_dist = action_analysis.get('action_distribution', {})
+                for action, count in action_dist.items():
+                    stats_info += f"{action}: {count:,}回\n"
+                stats_info += f"最頻アクション: {action_analysis.get('most_common_action', '不明')}\n\n"
+        
+        stats_text.setPlainText(stats_info)
+        stats_layout.addWidget(stats_text)
+        tab_widget.addTab(stats_tab, "詳細統計")
+        
+        # Raw data sample tab
+        raw_tab = QWidget()
+        raw_layout = QVBoxLayout(raw_tab)
+        raw_text = QPlainTextEdit()
+        raw_text.setReadOnly(True)
+        raw_text.setFont(QFont("Monaco", 9))
+        
+        # Show sample data
+        sample_data = optimization_context.get('full_results_sample', [])
+        raw_info = f"【生データサンプル（最新20行）】\n総データ行数: {optimization_context['total_rows']:,}行\n\n"
+        
+        if sample_data:
+            # Show column headers
+            if sample_data:
+                headers = list(sample_data[0].keys())
+                raw_info += "列: " + ", ".join(headers) + "\n\n"
+                
+                # Show sample rows
+                for i, row in enumerate(sample_data[:10]):  # Show first 10 of the 20 samples
+                    raw_info += f"行{len(all_results)-20+i+1}: "
+                    row_data = []
+                    for key, value in row.items():
+                        if isinstance(value, float):
+                            row_data.append(f"{key}={value:.2f}")
+                        else:
+                            row_data.append(f"{key}={value}")
+                    raw_info += ", ".join(row_data) + "\n"
+        
+        raw_text.setPlainText(raw_info)
+        raw_layout.addWidget(raw_text)
+        tab_widget.addTab(raw_tab, "生データ")
+        
+        layout.addWidget(tab_widget)
+        
+        # Close button
+        close_btn = QPushButton("閉じる")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+        
+        # Log debug access
+        self.add_log_message("🔍 AI送信データデバッグダイアログを表示")
+        
+        dialog.exec()
+        
+    def create_wheeling_data_tab(self):
+        """Create wheeling data management tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Title and controls
+        title_layout = QHBoxLayout()
+        title = QLabel("託送料金・損失率データ管理")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-bottom: 10px;")
+        title_layout.addWidget(title)
+        
+        title_layout.addStretch()
+        
+        # Control buttons
+        refresh_btn = QPushButton("🔄 データ再読み込み")
+        refresh_btn.clicked.connect(self.refresh_wheeling_data)
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17A2B8;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        title_layout.addWidget(refresh_btn)
+        
+        reset_btn = QPushButton("🔧 デフォルト復元")
+        reset_btn.clicked.connect(self.reset_wheeling_data)
+        reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFC107;
+                color: #212529;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #E0A800;
+            }
+        """)
+        title_layout.addWidget(reset_btn)
+        
+        save_btn = QPushButton("💾 変更保存")
+        save_btn.clicked.connect(self.save_wheeling_data)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28A745;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """)
+        title_layout.addWidget(save_btn)
+        
+        layout.addLayout(title_layout)
+        
+        # Separator
+        layout.addWidget(self.create_separator())
+        
+        # Information panel
+        info_layout = QHBoxLayout()
+        
+        # Renewable energy surcharge
+        surcharge_group = QGroupBox("再エネ賦課金")
+        surcharge_layout = QVBoxLayout(surcharge_group)
+        
+        surcharge_info = QLabel("全国一律: 3.49円/kWh")
+        surcharge_info.setStyleSheet("font-size: 14px; color: #666;")
+        surcharge_layout.addWidget(surcharge_info)
+        
+        # Make it editable
+        self.surcharge_input = QDoubleSpinBox()
+        self.surcharge_input.setRange(0.0, 10.0)
+        self.surcharge_input.setValue(3.49)
+        self.surcharge_input.setSuffix(" 円/kWh")
+        self.surcharge_input.setDecimals(2)
+        surcharge_layout.addWidget(self.surcharge_input)
+        
+        info_layout.addWidget(surcharge_group)
+        
+        # Usage instructions
+        usage_group = QGroupBox("使用方法")
+        usage_layout = QVBoxLayout(usage_group)
+        
+        usage_text = QLabel("""
+• 表中の値をダブルクリックで編集
+• 変更後は「💾 変更保存」で反映
+• 「🔧 デフォルト復元」で初期値に戻す
+• 「🔄 データ再読み込み」で最新データ取得
+        """)
+        usage_text.setStyleSheet("font-size: 12px; color: #666;")
+        usage_layout.addWidget(usage_text)
+        
+        info_layout.addWidget(usage_group)
+        
+        layout.addLayout(info_layout)
+        
+        # Create table for wheeling data
+        self.wheeling_table = QTableWidget()
+        self.wheeling_table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
+        self.wheeling_table.setAlternatingRowColors(True)
+        self.wheeling_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
+        # Setup table headers
+        self.setup_wheeling_table()
+        
+        layout.addWidget(self.wheeling_table)
+        
+        # Status information
+        status_layout = QHBoxLayout()
+        self.wheeling_status_label = QLabel("データ読み込み済み")
+        self.wheeling_status_label.setStyleSheet("color: #28A745; font-weight: bold;")
+        status_layout.addWidget(self.wheeling_status_label)
+        
+        status_layout.addStretch()
+        
+        modified_label = QLabel("※ 変更は「💾 変更保存」で反映されます")
+        modified_label.setStyleSheet("color: #666; font-size: 11px;")
+        status_layout.addWidget(modified_label)
+        
+        layout.addLayout(status_layout)
+        
+        return tab
+        
+    def setup_wheeling_table(self):
+        """Setup the wheeling data table"""
+        from config.area_config import WHEELING_DATA, AREA_NUMBER_TO_NAME, VOLTAGE_TYPES
+        
+        # Column headers
+        headers = [
+            "エリア", "電圧区分", "電圧区分名", 
+            "損失率 (%)", "託送基本料金 (円/kW)", "託送使用料 (円/kWh)"
+        ]
+        
+        # Calculate total rows
+        total_rows = len(AREA_NUMBER_TO_NAME) * len(VOLTAGE_TYPES)
+        
+        self.wheeling_table.setRowCount(total_rows)
+        self.wheeling_table.setColumnCount(len(headers))
+        self.wheeling_table.setHorizontalHeaderLabels(headers)
+        
+        # Populate data
+        row = 0
+        for area_num, area_name in AREA_NUMBER_TO_NAME.items():
+            for voltage_code, voltage_desc in VOLTAGE_TYPES.items():
+                # Get data for this area/voltage combination
+                area_data = WHEELING_DATA["areas"].get(area_name, {})
+                voltage_data = area_data.get(voltage_code, {})
+                
+                # Area
+                area_item = QTableWidgetItem(f"{area_num}: {area_name}")
+                area_item.setFlags(area_item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Read-only
+                area_item.setBackground(Qt.GlobalColor.lightGray)
+                self.wheeling_table.setItem(row, 0, area_item)
+                
+                # Voltage code
+                voltage_item = QTableWidgetItem(voltage_code)
+                voltage_item.setFlags(voltage_item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Read-only
+                voltage_item.setBackground(Qt.GlobalColor.lightGray)
+                self.wheeling_table.setItem(row, 1, voltage_item)
+                
+                # Voltage description
+                desc_item = QTableWidgetItem(voltage_desc)
+                desc_item.setFlags(desc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)  # Read-only
+                desc_item.setBackground(Qt.GlobalColor.lightGray)
+                self.wheeling_table.setItem(row, 2, desc_item)
+                
+                # Loss rate (editable)
+                loss_rate = voltage_data.get("loss_rate", 0.0)
+                loss_item = QTableWidgetItem(f"{loss_rate * 100:.3f}")
+                loss_item.setToolTip("損失率（パーセント）- ダブルクリックで編集")
+                self.wheeling_table.setItem(row, 3, loss_item)
+                
+                # Wheeling base charge (editable)
+                base_charge = voltage_data.get("wheeling_base_charge", 0.0)
+                base_item = QTableWidgetItem(f"{base_charge:.2f}")
+                base_item.setToolTip("託送基本料金（円/kW）- ダブルクリックで編集")
+                self.wheeling_table.setItem(row, 4, base_item)
+                
+                # Wheeling usage fee (editable)
+                usage_fee = voltage_data.get("wheeling_usage_fee", 0.0)
+                usage_item = QTableWidgetItem(f"{usage_fee:.2f}")
+                usage_item.setToolTip("託送使用料（円/kWh）- ダブルクリックで編集")
+                self.wheeling_table.setItem(row, 5, usage_item)
+                
+                row += 1
+        
+        # Resize columns to content
+        self.wheeling_table.resizeColumnsToContents()
+        
+        # Set minimum column widths
+        self.wheeling_table.setColumnWidth(0, 120)  # Area
+        self.wheeling_table.setColumnWidth(1, 80)   # Voltage code
+        self.wheeling_table.setColumnWidth(2, 200)  # Voltage description
+        self.wheeling_table.setColumnWidth(3, 100)  # Loss rate
+        self.wheeling_table.setColumnWidth(4, 150)  # Base charge
+        self.wheeling_table.setColumnWidth(5, 150)  # Usage fee
+        
+        self.add_log_message("📊 託送料金・損失率データテーブルを設定しました")
+        
+    def refresh_wheeling_data(self):
+        """Refresh wheeling data from config"""
+        try:
+            # Reimport the config to get fresh data
+            import importlib
+            from config import area_config
+            importlib.reload(area_config)
+            
+            # Refresh the table
+            self.setup_wheeling_table()
+            
+            # Update surcharge
+            self.surcharge_input.setValue(area_config.RENEWABLE_ENERGY_SURCHARGE)
+            
+            self.wheeling_status_label.setText("データ再読み込み完了")
+            self.wheeling_status_label.setStyleSheet("color: #28A745; font-weight: bold;")
+            self.add_log_message("🔄 託送料金・損失率データを再読み込みしました")
+            
+        except Exception as e:
+            self.wheeling_status_label.setText(f"エラー: {str(e)}")
+            self.wheeling_status_label.setStyleSheet("color: #DC3545; font-weight: bold;")
+            self.add_log_message(f"❌ データ再読み込みエラー: {str(e)}")
+            
+    def reset_wheeling_data(self):
+        """Reset wheeling data to defaults"""
+        reply = QMessageBox.question(
+            self, "デフォルト復元", 
+            "託送料金・損失率データを初期値に戻しますか？\n\n未保存の変更は失われます。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Reset to default values by reloading the original config
+                self.setup_wheeling_table()
+                self.surcharge_input.setValue(3.49)
+                
+                self.wheeling_status_label.setText("デフォルト値に復元しました")
+                self.wheeling_status_label.setStyleSheet("color: #FFC107; font-weight: bold;")
+                self.add_log_message("🔧 託送料金・損失率データをデフォルト値に復元しました")
+                
+            except Exception as e:
+                self.wheeling_status_label.setText(f"復元エラー: {str(e)}")
+                self.wheeling_status_label.setStyleSheet("color: #DC3545; font-weight: bold;")
+                self.add_log_message(f"❌ デフォルト復元エラー: {str(e)}")
+                
+    def save_wheeling_data(self):
+        """Save modified wheeling data"""
+        try:
+            from config.area_config import AREA_NUMBER_TO_NAME, VOLTAGE_TYPES
+            
+            # Create new data structure
+            new_wheeling_data = {"areas": {}}
+            
+            # Parse table data
+            row = 0
+            changes_made = 0
+            
+            for area_num, area_name in AREA_NUMBER_TO_NAME.items():
+                new_wheeling_data["areas"][area_name] = {}
+                
+                for voltage_code, voltage_desc in VOLTAGE_TYPES.items():
+                    try:
+                        # Get values from table
+                        loss_rate_text = self.wheeling_table.item(row, 3).text()
+                        base_charge_text = self.wheeling_table.item(row, 4).text()
+                        usage_fee_text = self.wheeling_table.item(row, 5).text()
+                        
+                        # Convert to numbers
+                        loss_rate = float(loss_rate_text) / 100.0  # Convert from percentage
+                        base_charge = float(base_charge_text)
+                        usage_fee = float(usage_fee_text)
+                        
+                        # Validate ranges
+                        if not (0 <= loss_rate <= 1):
+                            raise ValueError(f"損失率は0-100%の範囲で入力してください (行{row+1})")
+                        if base_charge < 0:
+                            raise ValueError(f"託送基本料金は0以上で入力してください (行{row+1})")
+                        if usage_fee < 0:
+                            raise ValueError(f"託送使用料は0以上で入力してください (行{row+1})")
+                        
+                        # Store data
+                        new_wheeling_data["areas"][area_name][voltage_code] = {
+                            "loss_rate": loss_rate,
+                            "wheeling_base_charge": base_charge,
+                            "wheeling_usage_fee": usage_fee
+                        }
+                        
+                        changes_made += 1
+                        
+                    except ValueError as e:
+                        QMessageBox.critical(self, "入力エラー", str(e))
+                        return
+                        
+                    row += 1
+            
+            # Update renewable energy surcharge
+            new_surcharge = self.surcharge_input.value()
+            
+            # Save to temporary variable (in a real app, you'd save to file)
+            self.modified_wheeling_data = new_wheeling_data
+            self.modified_surcharge = new_surcharge
+            
+            self.wheeling_status_label.setText(f"変更保存完了 ({changes_made}項目)")
+            self.wheeling_status_label.setStyleSheet("color: #28A745; font-weight: bold;")
+            
+            self.add_log_message(f"💾 託送料金・損失率データを保存しました ({changes_made}項目)")
+            self.add_log_message(f"💾 再エネ賦課金: {new_surcharge}円/kWh")
+            
+            # Show confirmation dialog
+            QMessageBox.information(
+                self, "保存完了", 
+                f"託送料金・損失率データの変更を保存しました。\n\n"
+                f"• 更新項目数: {changes_made}\n"
+                f"• 再エネ賦課金: {new_surcharge}円/kWh\n\n"
+                f"※ 次回の最適化実行時から新しい値が使用されます。"
+            )
+            
+        except Exception as e:
+            self.wheeling_status_label.setText(f"保存エラー: {str(e)}")
+            self.wheeling_status_label.setStyleSheet("color: #DC3545; font-weight: bold;")
+            self.add_log_message(f"❌ 託送料金・損失率データ保存エラー: {str(e)}")
+            QMessageBox.critical(self, "保存エラー", f"データの保存中にエラーが発生しました:\n\n{str(e)}")
+            
+    def get_current_wheeling_data(self):
+        """Get current wheeling data (modified or default)"""
+        if hasattr(self, 'modified_wheeling_data'):
+            return self.modified_wheeling_data
+        else:
+            from config.area_config import WHEELING_DATA
+            return WHEELING_DATA
+            
+    def get_current_surcharge(self):
+        """Get current renewable energy surcharge"""
+        if hasattr(self, 'modified_surcharge'):
+            return self.modified_surcharge
+        else:
+            from config.area_config import RENEWABLE_ENERGY_SURCHARGE
+            return RENEWABLE_ENERGY_SURCHARGE

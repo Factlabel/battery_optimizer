@@ -115,8 +115,8 @@ python run_battery_optimizer.py
 - **インテリジェントチャット**: 文脈理解型AI分析アシスタント
 - **自動エラー報告**: 管理者への自動報告システム
 
-#### 📊 **UI/UX大幅向上**
-- **5タブインターフェース**: Graphs, Revenue Details, Data, Summary, AI Chat
+#### �� **UI/UX大幅向上**
+- **6タブインターフェース**: Graphs, Revenue Details, Data, Summary, AI Chat, 託送料金・損失率
 - **統合設定画面**: ⚙️ボタンからAI・メール・一般設定を一元管理
 - **複数エンコーディング対応**: UTF-8, Shift_JIS, CP932, EUC-JP
 - **自動データ品質検証**: 7段階の詳細データ検証プロセス
