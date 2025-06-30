@@ -16,9 +16,9 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QComboBox, QPushButton, QFileDialog, QTextEdit,
     QProgressBar, QSplitter, QFrame, QGroupBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QScrollArea,
-    QStatusBar
+    QStatusBar, QDateEdit, QButtonGroup, QRadioButton
 )
-from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot
+from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot, QDate
 from PyQt6.QtGui import QFont, QPixmap, QAction, QIcon
 
 import matplotlib.pyplot as plt
@@ -61,6 +61,11 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.optimization_engine = None
         self.optimization_results = None
         self.current_data = None
+        
+        # Date range selection variables
+        self.date_range_start = None
+        self.date_range_end = None
+        self.date_range_mode = "all"  # "all", "range", "last_7", "last_30"
         
         self.init_ui()
         self.load_settings()
@@ -303,6 +308,41 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.max_eprx1_input.setSpecialValueText("制限なし")
         layout.addWidget(self.max_eprx1_input, 4, 1)
         
+        # Yearly cycle limit
+        layout.addWidget(QLabel("年間サイクル上限:"), 5, 0)
+        self.yearly_cycle_input = QSpinBox()
+        self.yearly_cycle_input.setRange(0, 5000)
+        self.yearly_cycle_input.setValue(365)
+        self.yearly_cycle_input.setSpecialValueText("制限なし")
+        self.yearly_cycle_input.setSuffix(" サイクル")
+        layout.addWidget(self.yearly_cycle_input, 5, 1)
+        
+        # Annual degradation rate
+        layout.addWidget(QLabel("年間劣化率:"), 6, 0)
+        self.degradation_input = QDoubleSpinBox()
+        self.degradation_input.setRange(0.0, 10.0)
+        self.degradation_input.setValue(3.0)
+        self.degradation_input.setSuffix(" %")
+        self.degradation_input.setDecimals(1)
+        layout.addWidget(self.degradation_input, 6, 1)
+        
+        # Performance mode selection
+        layout.addWidget(QLabel("パフォーマンスモード:"), 7, 0)
+        self.performance_mode_combo = QComboBox()
+        self.performance_mode_combo.addItems([
+            "高速モード (simple)",
+            "標準モード (basic)", 
+            "完全モード (full)"
+        ])
+        self.performance_mode_combo.setCurrentIndex(0)  # Default to simple mode for best performance
+        self.performance_mode_combo.currentTextChanged.connect(self.on_performance_mode_changed)
+        self.performance_mode_combo.setToolTip(
+            "高速モード: EPRX1制約なし、最高速度（推奨）\n"
+            "標準モード: 簡易EPRX1制約、バランス型\n"
+            "完全モード: 全EPRX1制約、Streamlit完全一致（大容量データで低速）"
+        )
+        layout.addWidget(self.performance_mode_combo, 7, 1)
+        
         return group
         
     def create_file_group(self):
@@ -439,24 +479,77 @@ class BatteryOptimizerMainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
+        # Chart controls
+        controls_frame = QFrame()
+        controls_frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        controls_layout = QVBoxLayout(controls_frame)
+        
+        # Date range selection group
+        date_group = QGroupBox("表示期間選択")
+        date_layout = QGridLayout(date_group)
+        
+        # Period preset radio buttons
+        self.date_range_group = QButtonGroup()
+        
+        self.all_period_radio = QRadioButton("全期間")
+        self.all_period_radio.setChecked(True)
+        self.all_period_radio.toggled.connect(lambda: self.set_date_range_mode("all"))
+        self.date_range_group.addButton(self.all_period_radio)
+        date_layout.addWidget(self.all_period_radio, 0, 0)
+        
+        self.last_7_radio = QRadioButton("最近7日間")
+        self.last_7_radio.toggled.connect(lambda: self.set_date_range_mode("last_7"))
+        self.date_range_group.addButton(self.last_7_radio)
+        date_layout.addWidget(self.last_7_radio, 0, 1)
+        
+        self.last_30_radio = QRadioButton("最近30日間")
+        self.last_30_radio.toggled.connect(lambda: self.set_date_range_mode("last_30"))
+        self.date_range_group.addButton(self.last_30_radio)
+        date_layout.addWidget(self.last_30_radio, 0, 2)
+        
+        self.custom_range_radio = QRadioButton("期間指定")
+        self.custom_range_radio.toggled.connect(lambda: self.set_date_range_mode("range"))
+        self.date_range_group.addButton(self.custom_range_radio)
+        date_layout.addWidget(self.custom_range_radio, 1, 0)
+        
+        # Custom date range selectors
+        self.start_date_edit = QDateEdit()
+        self.start_date_edit.setEnabled(False)
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
+        self.start_date_edit.dateChanged.connect(self.on_date_range_changed)
+        date_layout.addWidget(QLabel("開始日:"), 1, 1)
+        date_layout.addWidget(self.start_date_edit, 1, 2)
+        
+        self.end_date_edit = QDateEdit()
+        self.end_date_edit.setEnabled(False)
+        self.end_date_edit.setDate(QDate.currentDate())
+        self.end_date_edit.dateChanged.connect(self.on_date_range_changed)
+        date_layout.addWidget(QLabel("終了日:"), 1, 3)
+        date_layout.addWidget(self.end_date_edit, 1, 4)
+        
+        # Apply button
+        apply_button = QPushButton("適用")
+        apply_button.clicked.connect(self.update_visualization)
+        date_layout.addWidget(apply_button, 1, 5)
+        
+        controls_layout.addWidget(date_group)
+        
+        # Additional controls
+        chart_controls_layout = QHBoxLayout()
+        
+        refresh_chart_button = QPushButton("グラフ更新")
+        refresh_chart_button.clicked.connect(self.update_visualization)
+        chart_controls_layout.addWidget(refresh_chart_button)
+        
+        chart_controls_layout.addStretch()
+        controls_layout.addLayout(chart_controls_layout)
+        
+        layout.addWidget(controls_frame)
+        
         # Create matplotlib figure
         self.figure = Figure(figsize=(12, 8))
         self.canvas = FigureCanvas(self.figure)
         layout.addWidget(self.canvas)
-        
-        # Chart controls
-        controls_layout = QHBoxLayout()
-        
-        # Date range selection would go here
-        date_label = QLabel("表示期間: ")
-        controls_layout.addWidget(date_label)
-        controls_layout.addStretch()
-        
-        refresh_chart_button = QPushButton("グラフ更新")
-        refresh_chart_button.clicked.connect(self.update_visualization)
-        controls_layout.addWidget(refresh_chart_button)
-        
-        layout.addLayout(controls_layout)
         
         # Initialize empty chart
         self.init_empty_chart()
@@ -504,6 +597,120 @@ class BatteryOptimizerMainWindow(QMainWindow):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         return line
         
+    def set_date_range_mode(self, mode):
+        """Set date range selection mode"""
+        old_mode = getattr(self, 'date_range_mode', None)
+        self.date_range_mode = mode
+        
+        # Enable/disable custom date controls
+        if mode == "range":
+            self.start_date_edit.setEnabled(True)
+            self.end_date_edit.setEnabled(True)
+        else:
+            self.start_date_edit.setEnabled(False)
+            self.end_date_edit.setEnabled(False)
+            
+        # Log mode change
+        self.add_log_message(f"期間選択モード変更: {old_mode} → {mode}")
+            
+        # Auto-update visualization for preset modes
+        if mode != "range" and self.optimization_results:
+            self.update_visualization()
+    
+    def on_date_range_changed(self):
+        """Handle custom date range changes"""
+        if self.date_range_mode == "range":
+            start_qdate = self.start_date_edit.date()
+            end_qdate = self.end_date_edit.date()
+            
+            # Convert QDate to Python date for comparison
+            start_date = datetime(start_qdate.year(), start_qdate.month(), start_qdate.day()).date()
+            end_date = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day()).date()
+            
+            # Ensure start date is before end date
+            if start_date > end_date:
+                self.end_date_edit.setDate(self.start_date_edit.date())
+    
+    def on_performance_mode_changed(self):
+        """Handle performance mode change"""
+        current_mode = self.performance_mode_combo.currentText()
+        
+        if "simple" in current_mode:
+            self.add_log_message("💨 高速モード選択: EPRX1制約なしで最高速度")
+        elif "basic" in current_mode:
+            self.add_log_message("⚡ 標準モード選択: 簡易EPRX1制約、バランス型（推奨）")
+        elif "full" in current_mode:
+            self.add_log_message("🔧 完全モード選択: 全EPRX1制約、Streamlit完全一致（大容量データで低速）")
+            self.add_log_message("⚠️  完全モードは大容量データで時間がかかる場合があります")
+    
+    def get_filtered_data(self, df):
+        """Filter data based on selected date range"""
+        if df is None or df.empty:
+            return df
+            
+        # Ensure datetime column exists
+        if 'datetime' not in df.columns:
+            df = df.copy()
+            df['datetime'] = pd.to_datetime(df['date']) + pd.to_timedelta((df['slot'] - 1) * 30, unit='minutes')
+        
+        original_count = len(df)
+        
+        # Apply date range filter based on mode
+        if self.date_range_mode == "all":
+            filtered_df = df
+        elif self.date_range_mode == "last_7":
+            cutoff_date = df['datetime'].max() - timedelta(days=7)
+            filtered_df = df[df['datetime'] >= cutoff_date]
+            self.add_log_message(f"最近7日間フィルター: {original_count} → {len(filtered_df)} 行")
+        elif self.date_range_mode == "last_30":
+            cutoff_date = df['datetime'].max() - timedelta(days=30)
+            filtered_df = df[df['datetime'] >= cutoff_date]
+            self.add_log_message(f"最近30日間フィルター: {original_count} → {len(filtered_df)} 行")
+        elif self.date_range_mode == "range":
+            start_qdate = self.start_date_edit.date()
+            end_qdate = self.end_date_edit.date()
+            
+            # Convert QDate to Python date
+            start_date = datetime(start_qdate.year(), start_qdate.month(), start_qdate.day()).date()
+            end_date = datetime(end_qdate.year(), end_qdate.month(), end_qdate.day()).date()
+            
+            # Convert to datetime for comparison
+            start_datetime = pd.Timestamp(start_date)
+            end_datetime = pd.Timestamp(end_date) + pd.Timedelta(days=1)  # Include full end day
+            
+            filtered_df = df[(df['datetime'] >= start_datetime) & (df['datetime'] < end_datetime)]
+            self.add_log_message(f"期間指定フィルター ({start_date} - {end_date}): {original_count} → {len(filtered_df)} 行")
+        else:
+            filtered_df = df
+        
+        # Debug: Check if filtered data is empty
+        if filtered_df.empty:
+            self.add_log_message(f"警告: フィルター後のデータが空です (モード: {self.date_range_mode})")
+            if not df.empty:
+                data_range = f"{df['datetime'].min()} から {df['datetime'].max()}"
+                self.add_log_message(f"元データの日付範囲: {data_range}")
+        
+        return filtered_df
+        
+    def update_date_range_controls(self, df):
+        """Update date range controls based on loaded data"""
+        if df is None or df.empty:
+            return
+            
+        # Get date range from data
+        df_dates = pd.to_datetime(df['date'])
+        min_date = df_dates.min().date()
+        max_date = df_dates.max().date()
+        
+        # Update date edit controls
+        self.start_date_edit.setMinimumDate(QDate(min_date))
+        self.start_date_edit.setMaximumDate(QDate(max_date))
+        self.start_date_edit.setDate(QDate(min_date))
+        
+        self.end_date_edit.setMinimumDate(QDate(min_date))
+        self.end_date_edit.setMaximumDate(QDate(max_date))
+        self.end_date_edit.setDate(QDate(max_date))
+        
     def connect_optimization_signals(self):
         """Connect optimization engine signals to UI slots"""
         self.optimization_engine.progress_updated.connect(self.update_progress)
@@ -545,6 +752,9 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 self.file_info_label.setText(f"✓ {Path(file_path).name} ({len(df)} 行)")
                 self.file_info_label.setStyleSheet("color: green;")
                 self.optimize_button.setEnabled(True)
+                
+                # Update date range controls based on loaded data
+                self.update_date_range_controls(df)
                 
                 self.add_log_message(f"CSVファイルを読み込みました: {len(df)} 行")
                 self.status_bar.showMessage(f"データ読み込み完了: {len(df)} スロット")
@@ -632,19 +842,35 @@ class BatteryOptimizerMainWindow(QMainWindow):
             
     def collect_parameters(self) -> Dict[str, Any]:
         """Collect parameters from UI"""
+        # Parse area selection to get the correct area name
         area_number, area_name = parse_area_selection(self.area_combo.currentText())
         
+        # Map performance mode to debug mode
+        mode_text = self.performance_mode_combo.currentText()
+        if "simple" in mode_text:
+            debug_mode = 'simple'
+        elif "basic" in mode_text:
+            debug_mode = 'basic'
+        elif "full" in mode_text:
+            debug_mode = 'full'
+        else:
+            debug_mode = 'basic'  # Default fallback
+            
+        # Create parameters dictionary
         params = {
-            'target_area_name': area_name,
-            'voltage_type': self.voltage_combo.currentText(),
-            'battery_power_kW': self.power_input.value(),
-            'battery_capacity_kWh': self.capacity_input.value(),
-            'battery_loss_rate': self.loss_rate_input.value() / 100.0,  # Convert % to decimal
-            'daily_cycle_limit': self.daily_cycle_input.value(),
+            'target_area_name': area_name,  # Use parsed area name (e.g., "Tokyo" not "3: Tokyo")
+            'voltage_type': self.voltage_combo.currentText(),  # Should be "HV", "LV", or "SHV"
+            'battery_power_kW': float(self.power_input.value()),
+            'battery_capacity_kWh': float(self.capacity_input.value()),
+            'battery_loss_rate': float(self.loss_rate_input.value()) / 100,
+            'daily_cycle_limit': float(self.daily_cycle_input.value()),
+            'yearly_cycle_limit': float(self.yearly_cycle_input.value()),
+            'annual_degradation_rate': float(self.degradation_input.value()) / 100,
             'forecast_period': self.forecast_period_input.value(),
             'eprx1_block_size': self.eprx1_block_input.value(),
             'eprx1_block_cooldown': self.eprx1_cooldown_input.value(),
-            'max_daily_eprx1_slots': self.max_eprx1_input.value()
+            'max_daily_eprx1_slots': self.max_eprx1_input.value(),
+            'debug_mode': debug_mode  # Use selected performance mode
         }
         
         return params
@@ -779,6 +1005,16 @@ class BatteryOptimizerMainWindow(QMainWindow):
         df = pd.DataFrame(results_data)
         df['datetime'] = pd.to_datetime(df['date']) + pd.to_timedelta((df['slot'] - 1) * 30, unit='minutes')
         
+        # Apply date range filtering
+        filtered_df = self.get_filtered_data(df)
+        
+        if filtered_df.empty:
+            self.add_log_message(f"グラフ更新スキップ: フィルター後のデータが空 (モード: {self.date_range_mode})")
+            self.init_empty_chart()
+            return
+        
+        self.add_log_message(f"グラフ更新開始: {len(filtered_df)} 行のデータを使用 (モード: {self.date_range_mode})")
+        
         # Clear figure
         self.figure.clear()
         
@@ -786,29 +1022,82 @@ class BatteryOptimizerMainWindow(QMainWindow):
         ax1 = self.figure.add_subplot(211)
         ax2 = self.figure.add_subplot(212)
         
+        # Debug: Check if battery_level_kWh column exists and has data
+        if 'battery_level_kWh' not in filtered_df.columns:
+            self.add_log_message("警告: battery_level_kWh列が見つかりません")
+            print("Debug: Missing battery_level_kWh column")
+            print(f"Available columns: {list(filtered_df.columns)}")
+        elif filtered_df['battery_level_kWh'].isna().all():
+            self.add_log_message("警告: battery_level_kWh列にデータがありません")
+            print("Debug: battery_level_kWh column is all NaN")
+        elif (filtered_df['battery_level_kWh'] == 0).all():
+            self.add_log_message("警告: battery_level_kWh列が全て0です")
+            print("Debug: battery_level_kWh column is all zeros")
+        else:
+            min_val = filtered_df['battery_level_kWh'].min()
+            max_val = filtered_df['battery_level_kWh'].max()
+            self.add_log_message(f"バッテリー残量範囲: {min_val:.1f} - {max_val:.1f} kWh")
+            print(f"Debug: battery_level_kWh range: {min_val:.1f} - {max_val:.1f}")
+
         # Plot battery level
-        ax1.bar(df['datetime'], df['battery_level_kWh'], 
-                color='lightblue', alpha=0.7, width=0.02)
-        ax1.set_title('バッテリー残量 (kWh)')
-        ax1.set_ylabel('kWh')
-        ax1.grid(True, alpha=0.3)
+        try:
+            battery_data = filtered_df['battery_level_kWh'] if 'battery_level_kWh' in filtered_df.columns else [0] * len(filtered_df)
+            ax1.bar(filtered_df['datetime'], battery_data, 
+                    color='lightblue', alpha=0.7, width=0.02)
+            ax1.set_title(f'バッテリー残量 (kWh) - {self.get_date_range_title()}')
+            ax1.set_ylabel('kWh')
+            ax1.grid(True, alpha=0.3)
+        except Exception as e:
+            self.add_log_message(f"バッテリーグラフ描画エラー: {str(e)}")
+            print(f"Debug: Battery plot error: {str(e)}")
         
         # Plot JEPX price
-        ax2.plot(df['datetime'], df['JEPX_actual'], 
+        ax2.plot(filtered_df['datetime'], filtered_df['JEPX_actual'], 
                 color='red', linewidth=2, label='JEPX実績価格')
-        ax2.set_title('JEPX価格 (円/kWh)')
+        ax2.set_title(f'JEPX価格 (円/kWh) - {self.get_date_range_title()}')
         ax2.set_ylabel('円/kWh')
         ax2.set_xlabel('時刻')
         ax2.grid(True, alpha=0.3)
         ax2.legend()
         
-        # Format x-axis
+        # Format x-axis based on data range
+        date_range = (filtered_df['datetime'].max() - filtered_df['datetime'].min()).days
+        if date_range <= 1:
+            # For 1 day or less, show hourly ticks
+            for ax in [ax1, ax2]:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+        elif date_range <= 7:
+            # For up to 7 days, show daily ticks
+            for ax in [ax1, ax2]:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+                ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        else:
+            # For longer periods, show weekly ticks
+            for ax in [ax1, ax2]:
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+                ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+        
+        # Rotate labels for better readability
         for ax in [ax1, ax2]:
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
             
         self.figure.tight_layout()
         self.canvas.draw()
+        
+    def get_date_range_title(self):
+        """Get title describing current date range"""
+        if self.date_range_mode == "all":
+            return "全期間"
+        elif self.date_range_mode == "last_7":
+            return "最近7日間"
+        elif self.date_range_mode == "last_30":
+            return "最近30日間"
+        elif self.date_range_mode == "range":
+            start_date = self.start_date_edit.date().toString("yyyy/MM/dd")
+            end_date = self.end_date_edit.date().toString("yyyy/MM/dd")
+            return f"{start_date} - {end_date}"
+        return ""
         
     @pyqtSlot()
     def save_results(self):
@@ -859,6 +1148,8 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.eprx1_block_input.setValue(3)
             self.eprx1_cooldown_input.setValue(2)
             self.max_eprx1_input.setValue(6)
+            self.yearly_cycle_input.setValue(365)
+            self.degradation_input.setValue(3.0)
             
             self.add_log_message("パラメータをリセットしました")
             

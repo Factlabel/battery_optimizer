@@ -11,6 +11,7 @@ import pulp
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from typing import Dict, List, Optional, Tuple
 import logging
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -73,13 +74,16 @@ class OptimizationEngine(QThread):
             
             # Generate summary
             summary = self._generate_summary(results, params, wheeling_data)
+            monthly_summary = self._generate_monthly_summary(results, params, wheeling_data)
             self.progress_updated.emit(100)
             
             # Emit results
             self.status_updated.emit("最適化が完了しました！")
+            self.log_updated.emit(f"🎉 最適化完了! 総利益: {summary.get('total_profit', 0):.0f}円")
             self.optimization_completed.emit({
                 'results': results,
                 'summary': summary,
+                'monthly_summary': monthly_summary,
                 'params': params
             })
             
@@ -132,9 +136,16 @@ class OptimizationEngine(QThread):
         forecast_period = params.get('forecast_period', 48)
         num_days = (total_slots + forecast_period - 1) // forecast_period
         
+        # Show optimization scope
+        if not df_all.empty:
+            start_date = df_all['date'].min()
+            end_date = df_all['date'].max() 
+            self.log_updated.emit(f"📊 最適化対象: {start_date} から {end_date} ({num_days}日間, {total_slots}スロット)")
+        
         all_transactions = []
         carry_over_soc = 0.0
         total_cycles_used = 0.0
+        total_profit = 0.0
         
         # Battery parameters
         battery_power_kW = params['battery_power_kW']
@@ -163,6 +174,18 @@ class OptimizationEngine(QThread):
             if day_slots == 0:
                 break
             
+            # Debug: Check price data (reduce logging for performance)
+            if day_idx < 3:  # Only log first 3 days to reduce overhead
+                jepx_pred_sum = df_day['JEPX_prediction'].sum()
+                jepx_actual_sum = df_day['JEPX_actual'].sum()
+                self.log_updated.emit(f"Day {day_idx + 1}: JEPX_pred_sum={jepx_pred_sum:.1f}, JEPX_actual_sum={jepx_actual_sum:.1f}")
+            
+            # Check first few rows (reduce logging for performance)
+            if day_idx < 2:  # Only check first 2 days to reduce overhead
+                for idx in range(min(2, len(df_day))):  # Check only first 2 rows
+                    row_data = df_day.iloc[idx]
+                    self.log_updated.emit(f"  Row {idx}: JEPX_pred={row_data.get('JEPX_prediction'):.1f}, EPRX1_pred={row_data.get('EPRX1_prediction'):.1f}")
+            
             # Solve optimization for this day
             day_results, carry_over_soc = self._solve_daily_optimization(
                 df_day, params, wheeling_data, carry_over_soc, day_idx
@@ -170,7 +193,30 @@ class OptimizationEngine(QThread):
             
             all_transactions.extend(day_results)
             
-            self.log_updated.emit(f"Day {day_idx + 1} 完了: {len(day_results)} transactions")
+            # Calculate daily profit and cycle usage (like Streamlit)
+            day_profit = sum(r['Total_Daily_PnL'] for r in day_results)
+            total_profit += day_profit
+            
+            # Calculate daily cycle usage
+            day_charge_kWh = sum(r['charge_kWh'] for r in day_results)
+            day_cycle_count = day_charge_kWh / battery_capacity_kWh if battery_capacity_kWh > 0 else 0
+            total_cycles_used += day_cycle_count
+            
+            # Enhanced logging with cycle limit information
+            daily_cycle_limit = params.get('daily_cycle_limit', 0)
+            if daily_cycle_limit > 0:
+                limit_status = f"制限内" if day_cycle_count <= daily_cycle_limit else f"制限超過"
+                if day_idx < 5:  # Reduce logging frequency for performance
+                    self.log_updated.emit(f"Day {day_idx + 1} 完了: profit={day_profit:.0f}, cycles={day_cycle_count:.3f}/{daily_cycle_limit} ({limit_status})")
+            else:
+                if day_idx < 5:  # Reduce logging frequency for performance
+                    self.log_updated.emit(f"Day {day_idx + 1} 完了: profit={day_profit:.0f}, cycles={day_cycle_count:.3f} (制限なし)")
+            
+            # Check yearly cycle limit (exactly like Streamlit)
+            yearly_cycle_limit = params.get('yearly_cycle_limit', 0)
+            if (yearly_cycle_limit > 0) and (total_cycles_used > yearly_cycle_limit):
+                self.log_updated.emit(f"Yearly cycle limit ({yearly_cycle_limit}) reached at {total_cycles_used:.3f} cycles. Stopping optimization.")
+                break
         
         return all_transactions
     
@@ -185,6 +231,9 @@ class OptimizationEngine(QThread):
         battery_loss_rate = params['battery_loss_rate']
         half_power_kWh = battery_power_kW * 0.5
         wheeling_loss_rate = wheeling_data.get("loss_rate", 0.0)
+        
+        # Add debugging mode for gradual constraint addition
+        DEBUG_MODE = params.get('debug_mode', 'simple')  # Default to 'simple' for best performance
         
         # Create optimization problem
         prob = pulp.LpProblem(f"Battery_Optimization_Day{day_idx + 1}", pulp.LpMaximize)
@@ -202,19 +251,14 @@ class OptimizationEngine(QThread):
         # Binary variables for action selection
         is_charge = {}
         is_discharge = {}
-        is_eprx1 = {}
         is_eprx3 = {}
         is_idle = {}
         
         for i in range(day_slots):
             is_charge[i] = pulp.LpVariable(f"is_charge_day{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
             is_discharge[i] = pulp.LpVariable(f"is_discharge_day{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
-            is_eprx1[i] = pulp.LpVariable(f"is_eprx1_day{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
             is_eprx3[i] = pulp.LpVariable(f"is_eprx3_day{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
             is_idle[i] = pulp.LpVariable(f"is_idle_day{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
-            
-            # Exclusive action constraint
-            prob += is_charge[i] + is_discharge[i] + is_eprx1[i] + is_eprx3[i] + is_idle[i] == 1
             
             # Link continuous and binary variables
             prob += charge[i] <= is_charge[i]
@@ -229,6 +273,7 @@ class OptimizationEngine(QThread):
         
         # Initial SOC constraint
         prob += battery_soc[0] == initial_soc
+        self.log_updated.emit(f"Day {day_idx + 1}: initial_soc = {initial_soc}, day_slots = {day_slots}, debug_mode = {DEBUG_MODE}")
         
         # SOC transition constraints
         for i in range(day_slots):
@@ -238,57 +283,197 @@ class OptimizationEngine(QThread):
                        is_eprx3[i] * half_power_kWh)
             prob += battery_soc[i + 1] == next_soc
         
-        # Objective function: maximize profit
-        total_profit = 0
-        TAX = 1.1
-        
-        for i in range(day_slots):
-            row = df_day.iloc[i]
-            
-            # Charging cost
-            if not pd.isna(row['JEPX_prediction']):
-                procurement_kWh = charge[i] * half_power_kWh / (1 - wheeling_loss_rate)
-                charge_cost = procurement_kWh * row['JEPX_prediction'] * TAX
-                total_profit -= charge_cost
-            
-            # Discharging revenue
-            if not pd.isna(row['JEPX_actual']):
-                sales_kWh = discharge[i] * half_power_kWh * (1 - battery_loss_rate)
-                discharge_revenue = sales_kWh * row['JEPX_actual'] * TAX
-                total_profit += discharge_revenue
-            
-            # EPRX1 revenue
-            if not pd.isna(row['EPRX1_actual']):
-                eprx1_revenue = is_eprx1[i] * battery_power_kW * row['EPRX1_actual'] * TAX
-                total_profit += eprx1_revenue
-            
-            # EPRX3 revenue
-            if not pd.isna(row['EPRX3_actual']) and not pd.isna(row['imbalance']):
-                kw_value = battery_power_kW * row['EPRX3_actual']
-                kwh_value = half_power_kWh * (1 - battery_loss_rate) * row['imbalance']
-                eprx3_revenue = is_eprx3[i] * (kw_value + kwh_value) * TAX
-                total_profit += eprx3_revenue
-        
-        prob += total_profit
-        
-        # Additional constraints (daily cycle limit, EPRX1 constraints, etc.)
+        # Apply daily cycle limit constraint for ALL modes
         daily_cycle_limit = params.get('daily_cycle_limit', 0)
         if daily_cycle_limit > 0:
             daily_charge_sum = pulp.lpSum(charge[i] for i in range(day_slots)) * half_power_kWh
             prob += daily_charge_sum <= daily_cycle_limit * battery_capacity_kWh
+            if day_idx < 3:  # Only log first few days to reduce overhead
+                self.log_updated.emit(f"Day {day_idx + 1}: 日次サイクル制限適用 - {daily_cycle_limit} cycles")
+        
+        # EPRX1 variables and constraints (only if not simple mode)
+        if DEBUG_MODE == 'simple':
+            # Simple mode: only charge, discharge, eprx3, idle (no EPRX1 complexity)
+            self.log_updated.emit("Using SIMPLE mode: no EPRX1 blocks")
+            
+            # Exclusive action constraint (without EPRX1)
+            for i in range(day_slots):
+                prob += is_charge[i] + is_discharge[i] + is_eprx3[i] + is_idle[i] == 1
+                
+            # Prevent actions when prediction prices are invalid
+            for i in range(day_slots):
+                row = df_day.iloc[i]
+                # EPRX3 constraint: cannot use if prediction is 0 or NaN
+                e3pred = row.get('EPRX3_prediction', 0)
+                if pd.isna(e3pred) or e3pred == 0:
+                    prob += is_eprx3[i] == 0
+                    
+            # Objective function (simplified - no EPRX1)
+            TAX = 1.1
+            profit_terms = []
+            
+            for i in range(day_slots):
+                row = df_day.iloc[i]
+                
+                # Get prediction prices (NaN defaults to 0)
+                jpred = row.get('JEPX_prediction', 0.0)
+                if pd.isna(jpred):
+                    jpred = 0.0
+                e3pred = row.get('EPRX3_prediction', 0.0)
+                if pd.isna(e3pred):
+                    e3pred = 0.0
+                imb = row.get('imbalance', 0.0)
+                if pd.isna(imb):
+                    imb = 0.0
+                
+                # Charging cost
+                cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
+                
+                # Discharging revenue
+                rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
+                
+                # EPRX3 revenue
+                rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
+                
+                slot_profit = -cost_c + rev_d + rev_e3
+                profit_terms.append(slot_profit)
+                
+        else:
+            # Advanced modes: include EPRX1 block functionality
+            self.log_updated.emit(f"Using {DEBUG_MODE} mode: including EPRX1 blocks")
+            
+            # EPRX1 block parameters
+            M = params.get('eprx1_block_size', 4)  # Default 4 slots (2 hours)
+            C = params.get('eprx1_block_cooldown', 4)  # Default 4 slots cooldown
+            
+            # EPRX1 block start variables
+            block_start = pulp.LpVariable.dicts(
+                f"block_start_day{day_idx + 1}", range(day_slots),
+                cat=pulp.LpBinary
+            )
+            
+            # EPRX1 block participation
+            is_in_block = {}
+            for i in range(day_slots):
+                is_in_block[i] = pulp.LpVariable(f"in_block_{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
+                
+                # Exclusive action constraint (with EPRX1)
+                prob += is_charge[i] + is_discharge[i] + is_in_block[i] + is_eprx3[i] + is_idle[i] == 1
+            
+            # (A) is_in_block definition (EPRX1 block continuity)
+            for i in range(day_slots):
+                possible_starts = []
+                for x in range(max(0, i - (M - 1)), i + 1):
+                    if x + M - 1 >= i:
+                        possible_starts.append(block_start[x])
+                prob += is_in_block[i] == pulp.lpSum(possible_starts)
+            
+            # Prevent actions when prediction prices are invalid
+            for i in range(day_slots):
+                row = df_day.iloc[i]
+                
+                # EPRX3 constraint: cannot use if prediction is 0 or NaN
+                e3pred = row.get('EPRX3_prediction', 0)
+                if pd.isna(e3pred) or e3pred == 0:
+                    prob += is_eprx3[i] == 0
+            
+            if DEBUG_MODE == 'basic':
+                self.log_updated.emit("Using BASIC mode: simplified EPRX1 constraints")
+                
+                # Basic EPRX1 constraints only
+                # (G) EPRX1 prediction constraint: cannot start block if prediction is 0 or NaN
+                for i in range(day_slots):
+                    for slot_in_block in range(i, min(i + M, day_slots)):
+                        row = df_day.iloc[slot_in_block]
+                        e1pred = row.get('EPRX1_prediction', 0)
+                        if pd.isna(e1pred) or e1pred == 0:
+                            prob += block_start[i] <= 0
+                
+            elif DEBUG_MODE == 'full':
+                self.log_updated.emit("Using FULL mode: all EPRX1 constraints")
+                
+                # (E) EPRX1 block constraints (cooldown)
+                for i in range(day_slots):
+                    end_j = min(day_slots, i + M + C)
+                    for j in range(i + 1, end_j):
+                        prob += block_start[i] + block_start[j] <= 1
+                    if i > day_slots - M:
+                        prob += block_start[i] == 0
+                
+                # (G) EPRX1 prediction constraint: cannot start block if prediction is 0 or NaN
+                for i in range(day_slots):
+                    for slot_in_block in range(i, min(i + M, day_slots)):
+                        row = df_day.iloc[slot_in_block]
+                        e1pred = row.get('EPRX1_prediction', 0)
+                        if pd.isna(e1pred) or e1pred == 0:
+                            prob += block_start[i] <= 0
+                
+                # (I) Daily EPRX1 block limit
+                max_daily_eprx1_slots = params.get('max_daily_eprx1_slots', 0)
+                if max_daily_eprx1_slots > 0:
+                    prob += pulp.lpSum(is_in_block[i] for i in range(day_slots)) <= max_daily_eprx1_slots
+                
+                # EPRX1 SoC constraints (40-60% range when EPRX1 is active)
+                bigM = 999999
+                for i in range(day_slots):
+                    # When EPRX1 is active, SoC must be between 40-60%
+                    prob += battery_soc[i] >= 0.4 * battery_capacity_kWh - (1 - is_in_block[i]) * bigM
+                    prob += battery_soc[i] <= 0.6 * battery_capacity_kWh + (1 - is_in_block[i]) * bigM
+            
+            # Objective function (with EPRX1)
+            TAX = 1.1
+            profit_terms = []
+            
+            for i in range(day_slots):
+                row = df_day.iloc[i]
+                
+                # Get prediction prices (NaN defaults to 0)
+                jpred = row.get('JEPX_prediction', 0.0)
+                if pd.isna(jpred):
+                    jpred = 0.0
+                e1pred = row.get('EPRX1_prediction', 0.0) 
+                if pd.isna(e1pred):
+                    e1pred = 0.0
+                e3pred = row.get('EPRX3_prediction', 0.0)
+                if pd.isna(e3pred):
+                    e3pred = 0.0
+                imb = row.get('imbalance', 0.0)
+                if pd.isna(imb):
+                    imb = 0.0
+                
+                # Charging cost (NO TAX - exactly like Streamlit)
+                cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
+                
+                # Discharging revenue (NO TAX - exactly like Streamlit) 
+                rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
+                
+                # EPRX1 revenue (NO TAX - exactly like Streamlit)
+                rev_e1 = e1pred * battery_power_kW * is_in_block[i]
+                
+                # EPRX3 revenue (ONLY TAX applied here - exactly like Streamlit)
+                rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
+                
+                slot_profit = -cost_c + rev_d + rev_e1 + rev_e3
+                profit_terms.append(slot_profit)
+        
+        prob += pulp.lpSum(profit_terms)
         
         # Solve the problem
         try:
-            # Try COIN_CMD solver first (better compatibility on macOS)
+            # Try COIN_CMD solver first (better compatibility on macOS) - NO TIME LIMIT like Streamlit
+            start_time = time.time()
             try:
-                prob.solve(pulp.COIN_CMD(msg=0))
+                prob.solve(pulp.COIN_CMD(msg=0))  # Remove time limit for better optimization
             except:
                 # Fallback to HiGHS solver
                 try:
-                    prob.solve(pulp.HiGHS_CMD(msg=0))
+                    prob.solve(pulp.HiGHS_CMD(msg=0))  # Remove time limit here too
                 except:
                     # Final fallback to default solver
                     prob.solve()
+            
+            solve_time = time.time() - start_time
+            self.log_updated.emit(f"Optimization status: {pulp.LpStatus[prob.status]} (solved in {solve_time:.2f}s)")
             
             if prob.status != pulp.LpStatusOptimal:
                 raise RuntimeError(f"最適解が見つかりません。ステータス: {pulp.LpStatus[prob.status]}")
@@ -298,89 +483,167 @@ class OptimizationEngine(QThread):
         
         # Extract results
         day_results = []
-        final_soc = initial_soc
         
         for i in range(day_slots):
             row = df_day.iloc[i]
             
-            # Determine the selected action
-            action = "idle"
-            if is_charge[i].value() and is_charge[i].value() > 0.5:
-                action = "charge"
-            elif is_discharge[i].value() and is_discharge[i].value() > 0.5:
-                action = "discharge"
-            elif is_eprx1[i].value() and is_eprx1[i].value() > 0.5:
+            # Get solver values
+            c_val = pulp.value(charge[i]) if pulp.value(charge[i]) is not None else 0
+            d_val = pulp.value(discharge[i]) if pulp.value(discharge[i]) is not None else 0
+            
+            # Define thresholds for numerical precision
+            THRESHOLD = 1e-6  # Very small threshold for numerical precision
+            
+            # Determine the selected action based on binary variables AND actual values
+            action = "idle"  # Default action
+            
+            # Check EPRX1 first (if not in simple mode)
+            if DEBUG_MODE != 'simple' and pulp.value(is_in_block[i]) > 0.5:
                 action = "eprx1"
-            elif is_eprx3[i].value() and is_eprx3[i].value() > 0.5:
+            # Check EPRX3
+            elif pulp.value(is_eprx3[i]) > 0.5:
                 action = "eprx3"
+            # Check charge (binary variable AND actual charge amount)
+            elif pulp.value(is_charge[i]) > 0.5 and c_val > THRESHOLD:
+                action = "charge"
+            # Check discharge (binary variable AND actual discharge amount)  
+            elif pulp.value(is_discharge[i]) > 0.5 and d_val > THRESHOLD:
+                action = "discharge"
+            # Default to idle if no significant action
+            else:
+                action = "idle"
             
-            # Calculate energy flows
-            charge_kWh = charge[i].value() * half_power_kWh if charge[i].value() else 0
-            discharge_kWh = discharge[i].value() * half_power_kWh if discharge[i].value() else 0
-            eprx3_kWh = half_power_kWh if action == "eprx3" else 0
+            # Calculate energy flows according to action type (exactly like Streamlit)
+            j_a = row.get('JEPX_actual', 0.0) if not pd.isna(row.get('JEPX_actual', 0.0)) else 0.0
+            e1_a = row.get('EPRX1_actual', 0.0) if not pd.isna(row.get('EPRX1_actual', 0.0)) else 0.0
+            e3_a = row.get('EPRX3_actual', 0.0) if not pd.isna(row.get('EPRX3_actual', 0.0)) else 0.0
+            imb_a = row.get('imbalance', 0.0) if not pd.isna(row.get('imbalance', 0.0)) else 0.0
             
-            # Update SOC
-            final_soc = final_soc + charge_kWh - discharge_kWh - eprx3_kWh
+            # Use exact same logic as Streamlit
+            if action == "charge":
+                c_kwh = c_val * half_power_kWh
+                effective_kwh = c_kwh
+                loss_kwh = 0.0
+            elif action == "discharge":
+                d_kwh = d_val * half_power_kWh
+                effective_kwh = d_kwh * (1 - battery_loss_rate)
+                loss_kwh = d_kwh * battery_loss_rate
+            elif action == "eprx1":
+                c_kwh = 0.0  # No charging in EPRX1
+                effective_kwh = 0.0
+                loss_kwh = 0.0
+            elif action == "eprx3":
+                c_kwh = 0.0  # No charging in EPRX3
+                # EPRX3は数量調整せず、常に最大放電量からロス分を引いた値を使用
+                effective_kwh = half_power_kWh * (1 - battery_loss_rate)
+                loss_kwh = half_power_kWh * battery_loss_rate
+            else:  # idle
+                c_kwh = 0.0
+                effective_kwh = 0.0
+                loss_kwh = 0.0
             
-            # Calculate PnL for this slot
-            slot_pnl = self._calculate_slot_pnl(
-                action, charge_kWh, discharge_kWh, eprx3_kWh,
+            # Get SOC from optimization solver (this is the correct value)
+            soc_value = battery_soc[i + 1].value()
+            current_soc = pulp.value(battery_soc[i + 1]) if soc_value is not None else 0
+            
+            # Debug logging (reduce for performance)
+            if i < 3 and day_idx < 2:  # Only log first few slots of first few days
+                self.log_updated.emit(f"Slot {i}: action={action}, current_soc={current_soc:.1f}")
+                self.log_updated.emit(f"  c_val={c_val:.6f} (binary={pulp.value(is_charge[i]):.1f}), d_val={d_val:.6f} (binary={pulp.value(is_discharge[i]):.1f})")
+                self.log_updated.emit(f"  charge_kWh={c_kwh:.3f}, effective_kwh={effective_kwh:.3f}")
+            
+            # Calculate PnL components (exactly like Streamlit)
+            pnl_data = self._calculate_slot_pnl(
+                action, c_kwh if action == "charge" else 0,
+                effective_kwh if action == "discharge" else 0,
+                effective_kwh if action == "eprx3" else 0,
                 row, battery_loss_rate, wheeling_loss_rate, battery_power_kW
             )
             
             result = {
                 'date': row['date'],
-                'slot': row['slot'],
+                'slot': int(row['slot']),
                 'action': action,
-                'charge_kWh': charge_kWh,
-                'discharge_kWh': discharge_kWh,
-                'eprx3_kWh': eprx3_kWh,
-                'battery_level_kWh': final_soc,
-                'slot_pnl': slot_pnl,
+                'battery_level_kWh': round(current_soc, 2),
+                'charge_kWh': round(c_kwh, 3) if action == "charge" else 0,
+                'discharge_kWh': round(effective_kwh, 3) if action == "discharge" else 0,
+                'EPRX3_kWh': round(effective_kwh, 3) if action == "eprx3" else 0,
+                'loss_kWh': round(loss_kwh, 3),
+                'JEPX_actual': round(j_a, 3),
+                'EPRX1_actual': round(e1_a, 3),
+                'EPRX3_actual': round(e3_a, 3),
+                'imbalance': round(imb_a, 3),
+                'JEPX_PnL': pnl_data['JEPX_PnL'],
+                'EPRX1_PnL': pnl_data['EPRX1_PnL'],
+                'EPRX3_PnL': pnl_data['EPRX3_PnL'],
+                'Total_Daily_PnL': pnl_data['Total_Daily_PnL'],
                 'JEPX_prediction': row.get('JEPX_prediction', 0),
-                'JEPX_actual': row.get('JEPX_actual', 0),
-                'EPRX1_actual': row.get('EPRX1_actual', 0),
-                'EPRX3_actual': row.get('EPRX3_actual', 0),
-                'imbalance': row.get('imbalance', 0)
+                'EPRX1_prediction': row.get('EPRX1_prediction', 0),
+                'EPRX3_prediction': row.get('EPRX3_prediction', 0)
             }
             
             day_results.append(result)
+        
+        # Calculate actual cycle usage from optimization results
+        total_charge_kWh = sum(r['charge_kWh'] for r in day_results)
+        actual_cycles = total_charge_kWh / battery_capacity_kWh if battery_capacity_kWh > 0 else 0
+        
+        # Check against constraint (reduce logging for performance)
+        daily_cycle_limit = params.get('daily_cycle_limit', 0)
+        if daily_cycle_limit > 0 and day_idx < 3:  # Only log first few days
+            if actual_cycles > daily_cycle_limit + 0.001:  # Small tolerance for floating point
+                self.log_updated.emit(f"⚠️ Day {day_idx + 1}: 制約違反検知 - 実績サイクル {actual_cycles:.3f} > 制限 {daily_cycle_limit}")
+        
+        # Get final SOC for next day initialization
+        final_soc = pulp.value(battery_soc[day_slots]) if battery_soc[day_slots].value() is not None else initial_soc
+        if day_idx < 3:  # Only log first few days
+            self.log_updated.emit(f"Day {day_idx + 1}: final_soc = {final_soc:.1f}")
         
         return day_results, final_soc
     
     def _calculate_slot_pnl(self, action: str, charge_kWh: float, discharge_kWh: float,
                           eprx3_kWh: float, row: pd.Series, battery_loss_rate: float,
-                          wheeling_loss_rate: float, battery_power_kW: float) -> float:
-        """Calculate PnL for a single slot"""
+                          wheeling_loss_rate: float, battery_power_kW: float) -> Dict[str, float]:
+        """Calculate PnL for a single slot - exactly like Streamlit"""
         
         TAX = 1.1
-        pnl = 0.0
         
-        # Charging cost
-        if action == "charge" and charge_kWh > 0:
-            procurement_kWh = charge_kWh / (1 - wheeling_loss_rate)
-            cost = procurement_kWh * row.get('JEPX_prediction', 0) * TAX
-            pnl -= cost
+        # Get actual prices (not prediction!)
+        j_a = row.get('JEPX_actual', 0.0) if not pd.isna(row.get('JEPX_actual', 0.0)) else 0.0
+        e1_a = row.get('EPRX1_actual', 0.0) if not pd.isna(row.get('EPRX1_actual', 0.0)) else 0.0
+        e3_a = row.get('EPRX3_actual', 0.0) if not pd.isna(row.get('EPRX3_actual', 0.0)) else 0.0
+        imb_a = row.get('imbalance', 0.0) if not pd.isna(row.get('imbalance', 0.0)) else 0.0
         
-        # Discharging revenue
-        if action == "discharge" and discharge_kWh > 0:
-            sales_kWh = discharge_kWh * (1 - battery_loss_rate)
-            revenue = sales_kWh * row.get('JEPX_actual', 0) * TAX
-            pnl += revenue
+        # Initialize PnL components (exactly like Streamlit)
+        slot_jepx_pnl = 0.0
+        slot_eprx1_pnl = 0.0
+        slot_eprx3_pnl = 0.0
         
-        # EPRX1 revenue
-        if action == "eprx1":
-            revenue = battery_power_kW * row.get('EPRX1_actual', 0) * TAX
-            pnl += revenue
+        if action == "charge":
+            c_kwh = charge_kWh
+            cost = j_a * TAX * (c_kwh / (1 - wheeling_loss_rate))
+            slot_jepx_pnl = -cost
+        elif action == "discharge":
+            d_kwh = discharge_kWh / (1 - battery_loss_rate)  # Reverse calculate original discharge
+            effective_kwh = d_kwh * (1 - battery_loss_rate)
+            slot_jepx_pnl = j_a * TAX * effective_kwh
+        elif action == "eprx1":
+            slot_eprx1_pnl = e1_a * TAX * battery_power_kW
+        elif action == "eprx3":
+            # EPRX3は数量調整せず、常に最大放電量からロス分を引いた値を使用
+            kW_value = battery_power_kW * e3_a
+            kWh_value = eprx3_kWh * imb_a  # eprx3_kWh is already effective (loss removed)
+            slot_eprx3_pnl = TAX * (kW_value + kWh_value)
+        # idle: all PnL components remain 0
         
-        # EPRX3 revenue
-        if action == "eprx3" and eprx3_kWh > 0:
-            kw_value = battery_power_kW * row.get('EPRX3_actual', 0)
-            kwh_value = eprx3_kWh * (1 - battery_loss_rate) * row.get('imbalance', 0)
-            revenue = (kw_value + kwh_value) * TAX
-            pnl += revenue
+        slot_total_pnl = slot_jepx_pnl + slot_eprx1_pnl + slot_eprx3_pnl
         
-        return pnl
+        return {
+            'JEPX_PnL': round(slot_jepx_pnl),
+            'EPRX1_PnL': round(slot_eprx1_pnl),
+            'EPRX3_PnL': round(slot_eprx3_pnl),
+            'Total_Daily_PnL': round(slot_total_pnl)
+        }
     
     def _generate_summary(self, results: List[Dict], params: Dict, 
                          wheeling_data: Dict) -> Dict:
@@ -394,9 +657,12 @@ class OptimizationEngine(QThread):
         # Calculate totals
         total_charge_kWh = df_results['charge_kWh'].sum()
         total_discharge_kWh = df_results['discharge_kWh'].sum()
-        total_eprx3_kWh = df_results['eprx3_kWh'].sum()
-        total_loss_kWh = total_discharge_kWh * params['battery_loss_rate']
-        total_daily_pnl = df_results['slot_pnl'].sum()
+        total_eprx3_kWh = df_results['EPRX3_kWh'].sum()  # Fixed column name
+        total_loss_kWh = df_results['loss_kWh'].sum()  # Use actual loss column
+        # total_daily_pnl = df_results['slot_pnl'].sum()  # This column doesn't exist anymore
+        
+        # Calculate total PnL from results (PnL already calculated per slot)
+        total_daily_pnl = df_results['Total_Daily_PnL'].sum()
         
         # Calculate monthly fees
         battery_power_kW = params['battery_power_kW']
@@ -421,6 +687,90 @@ class OptimizationEngine(QThread):
         }
         
         return summary
+
+    def _generate_monthly_summary(self, results: List[Dict], params: Dict, 
+                                 wheeling_data: Dict) -> pd.DataFrame:
+        """Generate monthly summary like Streamlit app"""
+        
+        if not results:
+            return pd.DataFrame()
+        
+        # Import here to avoid circular imports
+        from config.area_config import RENEWABLE_ENERGY_SURCHARGE
+        
+        df = pd.DataFrame(results)
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["month"] = df["date"].dt.to_period("M").astype(str)
+        summary_list = []
+
+        battery_power_kW = params['battery_power_kW']
+        target_area_name = params['target_area_name']
+        voltage_type = params['voltage_type']
+        
+        for month, group in df.groupby("month"):
+            monthly_charge = group[group["action"] == "charge"]["charge_kWh"].sum()
+            effective_discharge = (
+                group[group["action"] == "discharge"]["discharge_kWh"].sum() +
+                group[group["action"] == "eprx3"]["EPRX3_kWh"].sum()
+            )
+            total_loss = group["loss_kWh"].sum()
+            monthly_total_pnl = group["Total_Daily_PnL"].sum()
+
+            wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
+            wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
+            monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
+            monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
+
+            action_counts = group["action"].value_counts().to_dict()
+            action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
+
+            charge_group = group[group["action"] == "charge"]
+            if charge_group["charge_kWh"].sum() > 0:
+                avg_charge_price = charge_group["JEPX_PnL"].sum() / charge_group["charge_kWh"].sum()
+            else:
+                avg_charge_price = None
+
+            discharge_group = group[group["action"] == "discharge"]
+            if discharge_group["discharge_kWh"].sum() > 0:
+                avg_discharge_price = discharge_group["JEPX_PnL"].sum() / discharge_group["discharge_kWh"].sum()
+            else:
+                avg_discharge_price = None
+
+            eprx3_group = group[group["action"] == "eprx3"]
+            if not eprx3_group.empty:
+                avg_eprx3_price = eprx3_group["EPRX3_actual"].mean()
+            else:
+                avg_eprx3_price = None
+
+            eprx1_group = group[group["action"] == "eprx1"]
+            if not eprx1_group.empty:
+                avg_eprx1_price = eprx1_group["EPRX1_actual"].mean()
+            else:
+                avg_eprx1_price = None
+
+            monthly_net_profit = monthly_total_pnl - monthly_wheeling_fee - monthly_renewable_energy_surcharge
+
+            summary_list.append({
+                "Month": month,
+                "Total_Charge_kWh": round(monthly_charge),
+                "Total_Discharge_kWh": round(effective_discharge),
+                "Total_Loss_kWh": round(total_loss),
+                "Total_EPRX3_kWh": round(eprx3_group["EPRX3_kWh"].sum()),
+                "Total_JEPX_PnL": round(group["JEPX_PnL"].sum()),
+                "Total_EPRX1_PnL": round(group["EPRX1_PnL"].sum()),
+                "Total_EPRX3_PnL": round(group["EPRX3_PnL"].sum()),
+                "Total_Monthly_PnL": round(monthly_total_pnl),
+                "Monthly_Wheeling_Fee": round(monthly_wheeling_fee),
+                "Monthly_Renewable_Energy_Surcharge": round(monthly_renewable_energy_surcharge),
+                "Monthly_Net_Profit": round(monthly_net_profit),
+                "Action_Counts": action_counts_str,
+                "Average_Charge_Price": round(avg_charge_price, 2) if avg_charge_price is not None else None,
+                "Average_Discharge_Price": round(avg_discharge_price, 2) if avg_discharge_price is not None else None,
+                "Average_EPRX1_Price": round(avg_eprx1_price, 2) if avg_eprx1_price is not None else None,
+                "Average_EPRX3_Price": round(avg_eprx3_price, 2) if avg_eprx3_price is not None else None,
+            })
+
+        return pd.DataFrame(summary_list)
 
 
 class InterruptedException(Exception):
