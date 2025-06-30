@@ -232,8 +232,8 @@ class OptimizationEngine(QThread):
         half_power_kWh = battery_power_kW * 0.5
         wheeling_loss_rate = wheeling_data.get("loss_rate", 0.0)
         
-        # Add debugging mode for gradual constraint addition
-        DEBUG_MODE = params.get('debug_mode', 'simple')  # Default to 'simple' for best performance
+        # Add debugging mode - now fixed to 'full' for maximum accuracy
+        DEBUG_MODE = 'full'  # Always use full mode for complete optimization
         
         # Create optimization problem
         prob = pulp.LpProblem(f"Battery_Optimization_Day{day_idx + 1}", pulp.LpMaximize)
@@ -273,7 +273,7 @@ class OptimizationEngine(QThread):
         
         # Initial SOC constraint
         prob += battery_soc[0] == initial_soc
-        self.log_updated.emit(f"Day {day_idx + 1}: initial_soc = {initial_soc}, day_slots = {day_slots}, debug_mode = {DEBUG_MODE}")
+        self.log_updated.emit(f"Day {day_idx + 1}: initial_soc = {initial_soc}, day_slots = {day_slots}, mode = FULL")
         
         # SOC transition constraints
         for i in range(day_slots):
@@ -283,7 +283,7 @@ class OptimizationEngine(QThread):
                        is_eprx3[i] * half_power_kWh)
             prob += battery_soc[i + 1] == next_soc
         
-        # Apply daily cycle limit constraint for ALL modes
+        # Apply daily cycle limit constraint
         daily_cycle_limit = params.get('daily_cycle_limit', 0)
         if daily_cycle_limit > 0:
             daily_charge_sum = pulp.lpSum(charge[i] for i in range(day_slots)) * half_power_kWh
@@ -291,170 +291,106 @@ class OptimizationEngine(QThread):
             if day_idx < 3:  # Only log first few days to reduce overhead
                 self.log_updated.emit(f"Day {day_idx + 1}: 日次サイクル制限適用 - {daily_cycle_limit} cycles")
         
-        # EPRX1 variables and constraints (only if not simple mode)
-        if DEBUG_MODE == 'simple':
-            # Simple mode: only charge, discharge, eprx3, idle (no EPRX1 complexity)
-            self.log_updated.emit("Using SIMPLE mode: no EPRX1 blocks")
+        # EPRX1 block functionality (Full mode implementation)
+        self.log_updated.emit(f"Using FULL mode: all EPRX1 constraints and features")
+        
+        # EPRX1 block parameters
+        M = params.get('eprx1_block_size', 4)  # Default 4 slots (2 hours)
+        C = params.get('eprx1_block_cooldown', 4)  # Default 4 slots cooldown
+        
+        # EPRX1 block start variables
+        block_start = pulp.LpVariable.dicts(
+            f"block_start_day{day_idx + 1}", range(day_slots),
+            cat=pulp.LpBinary
+        )
+        
+        # EPRX1 block participation
+        is_in_block = {}
+        for i in range(day_slots):
+            is_in_block[i] = pulp.LpVariable(f"in_block_{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
             
-            # Exclusive action constraint (without EPRX1)
-            for i in range(day_slots):
-                prob += is_charge[i] + is_discharge[i] + is_eprx3[i] + is_idle[i] == 1
-                
-            # Prevent actions when prediction prices are invalid
-            for i in range(day_slots):
-                row = df_day.iloc[i]
-                # EPRX3 constraint: cannot use if prediction is 0 or NaN
-                e3pred = row.get('EPRX3_prediction', 0)
-                if pd.isna(e3pred) or e3pred == 0:
-                    prob += is_eprx3[i] == 0
-                    
-            # Objective function (simplified - no EPRX1)
-            TAX = 1.1
-            profit_terms = []
+            # Exclusive action constraint (with all 5 actions)
+            prob += is_charge[i] + is_discharge[i] + is_in_block[i] + is_eprx3[i] + is_idle[i] == 1
+        
+        # EPRX1 block continuity constraints
+        for i in range(day_slots):
+            possible_starts = []
+            for x in range(max(0, i - (M - 1)), i + 1):
+                if x + M - 1 >= i:
+                    possible_starts.append(block_start[x])
+            prob += is_in_block[i] == pulp.lpSum(possible_starts)
+        
+        # EPRX1 block cooldown constraints
+        for i in range(day_slots):
+            end_j = min(day_slots, i + M + C)
+            for j in range(i + 1, end_j):
+                prob += block_start[i] + block_start[j] <= 1
+            if i > day_slots - M:
+                prob += block_start[i] == 0
+        
+        # EPRX1 prediction constraint: cannot start block if prediction is 0 or NaN
+        for i in range(day_slots):
+            for slot_in_block in range(i, min(i + M, day_slots)):
+                row = df_day.iloc[slot_in_block]
+                e1pred = row.get('EPRX1_prediction', 0)
+                if pd.isna(e1pred) or e1pred == 0:
+                    prob += block_start[i] <= 0
+        
+        # Daily EPRX1 block limit
+        max_daily_eprx1_slots = params.get('max_daily_eprx1_slots', 0)
+        if max_daily_eprx1_slots > 0:
+            prob += pulp.lpSum(is_in_block[i] for i in range(day_slots)) <= max_daily_eprx1_slots
+        
+        # EPRX1 SoC constraints (40-60% range when EPRX1 is active)
+        bigM = 999999
+        for i in range(day_slots):
+            # When EPRX1 is active, SoC must be between 40-60%
+            prob += battery_soc[i] >= 0.4 * battery_capacity_kWh - (1 - is_in_block[i]) * bigM
+            prob += battery_soc[i] <= 0.6 * battery_capacity_kWh + (1 - is_in_block[i]) * bigM
+        
+        # Prevent actions when prediction prices are invalid
+        for i in range(day_slots):
+            row = df_day.iloc[i]
+            # EPRX3 constraint: cannot use if prediction is 0 or NaN
+            e3pred = row.get('EPRX3_prediction', 0)
+            if pd.isna(e3pred) or e3pred == 0:
+                prob += is_eprx3[i] == 0
+        
+        # Objective function (complete with all markets)
+        TAX = 1.1
+        profit_terms = []
+        
+        for i in range(day_slots):
+            row = df_day.iloc[i]
             
-            for i in range(day_slots):
-                row = df_day.iloc[i]
-                
-                # Get prediction prices (NaN defaults to 0)
-                jpred = row.get('JEPX_prediction', 0.0)
-                if pd.isna(jpred):
-                    jpred = 0.0
-                e3pred = row.get('EPRX3_prediction', 0.0)
-                if pd.isna(e3pred):
-                    e3pred = 0.0
-                imb = row.get('imbalance', 0.0)
-                if pd.isna(imb):
-                    imb = 0.0
-                
-                # Charging cost
-                cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
-                
-                # Discharging revenue
-                rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
-                
-                # EPRX3 revenue
-                rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
-                
-                slot_profit = -cost_c + rev_d + rev_e3
-                profit_terms.append(slot_profit)
-                
-        else:
-            # Advanced modes: include EPRX1 block functionality
-            self.log_updated.emit(f"Using {DEBUG_MODE} mode: including EPRX1 blocks")
+            # Get prediction prices (NaN defaults to 0)
+            jpred = row.get('JEPX_prediction', 0.0)
+            if pd.isna(jpred):
+                jpred = 0.0
+            e1pred = row.get('EPRX1_prediction', 0.0) 
+            if pd.isna(e1pred):
+                e1pred = 0.0
+            e3pred = row.get('EPRX3_prediction', 0.0)
+            if pd.isna(e3pred):
+                e3pred = 0.0
+            imb = row.get('imbalance', 0.0)
+            if pd.isna(imb):
+                imb = 0.0
             
-            # EPRX1 block parameters
-            M = params.get('eprx1_block_size', 4)  # Default 4 slots (2 hours)
-            C = params.get('eprx1_block_cooldown', 4)  # Default 4 slots cooldown
+            # Charging cost (NO TAX - exactly like Streamlit)
+            cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
             
-            # EPRX1 block start variables
-            block_start = pulp.LpVariable.dicts(
-                f"block_start_day{day_idx + 1}", range(day_slots),
-                cat=pulp.LpBinary
-            )
+            # Discharging revenue (NO TAX - exactly like Streamlit) 
+            rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
             
-            # EPRX1 block participation
-            is_in_block = {}
-            for i in range(day_slots):
-                is_in_block[i] = pulp.LpVariable(f"in_block_{day_idx + 1}_slot{i}", cat=pulp.LpBinary)
-                
-                # Exclusive action constraint (with EPRX1)
-                prob += is_charge[i] + is_discharge[i] + is_in_block[i] + is_eprx3[i] + is_idle[i] == 1
+            # EPRX1 revenue (NO TAX - exactly like Streamlit)
+            rev_e1 = e1pred * battery_power_kW * is_in_block[i]
             
-            # (A) is_in_block definition (EPRX1 block continuity)
-            for i in range(day_slots):
-                possible_starts = []
-                for x in range(max(0, i - (M - 1)), i + 1):
-                    if x + M - 1 >= i:
-                        possible_starts.append(block_start[x])
-                prob += is_in_block[i] == pulp.lpSum(possible_starts)
+            # EPRX3 revenue (ONLY TAX applied here - exactly like Streamlit)
+            rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
             
-            # Prevent actions when prediction prices are invalid
-            for i in range(day_slots):
-                row = df_day.iloc[i]
-                
-                # EPRX3 constraint: cannot use if prediction is 0 or NaN
-                e3pred = row.get('EPRX3_prediction', 0)
-                if pd.isna(e3pred) or e3pred == 0:
-                    prob += is_eprx3[i] == 0
-            
-            if DEBUG_MODE == 'basic':
-                self.log_updated.emit("Using BASIC mode: simplified EPRX1 constraints")
-                
-                # Basic EPRX1 constraints only
-                # (G) EPRX1 prediction constraint: cannot start block if prediction is 0 or NaN
-                for i in range(day_slots):
-                    for slot_in_block in range(i, min(i + M, day_slots)):
-                        row = df_day.iloc[slot_in_block]
-                        e1pred = row.get('EPRX1_prediction', 0)
-                        if pd.isna(e1pred) or e1pred == 0:
-                            prob += block_start[i] <= 0
-                
-            elif DEBUG_MODE == 'full':
-                self.log_updated.emit("Using FULL mode: all EPRX1 constraints")
-                
-                # (E) EPRX1 block constraints (cooldown)
-                for i in range(day_slots):
-                    end_j = min(day_slots, i + M + C)
-                    for j in range(i + 1, end_j):
-                        prob += block_start[i] + block_start[j] <= 1
-                    if i > day_slots - M:
-                        prob += block_start[i] == 0
-                
-                # (G) EPRX1 prediction constraint: cannot start block if prediction is 0 or NaN
-                for i in range(day_slots):
-                    for slot_in_block in range(i, min(i + M, day_slots)):
-                        row = df_day.iloc[slot_in_block]
-                        e1pred = row.get('EPRX1_prediction', 0)
-                        if pd.isna(e1pred) or e1pred == 0:
-                            prob += block_start[i] <= 0
-                
-                # (I) Daily EPRX1 block limit
-                max_daily_eprx1_slots = params.get('max_daily_eprx1_slots', 0)
-                if max_daily_eprx1_slots > 0:
-                    prob += pulp.lpSum(is_in_block[i] for i in range(day_slots)) <= max_daily_eprx1_slots
-                
-                # EPRX1 SoC constraints (40-60% range when EPRX1 is active)
-                bigM = 999999
-                for i in range(day_slots):
-                    # When EPRX1 is active, SoC must be between 40-60%
-                    prob += battery_soc[i] >= 0.4 * battery_capacity_kWh - (1 - is_in_block[i]) * bigM
-                    prob += battery_soc[i] <= 0.6 * battery_capacity_kWh + (1 - is_in_block[i]) * bigM
-            
-            # Objective function (with EPRX1)
-            TAX = 1.1
-            profit_terms = []
-            
-            for i in range(day_slots):
-                row = df_day.iloc[i]
-                
-                # Get prediction prices (NaN defaults to 0)
-                jpred = row.get('JEPX_prediction', 0.0)
-                if pd.isna(jpred):
-                    jpred = 0.0
-                e1pred = row.get('EPRX1_prediction', 0.0) 
-                if pd.isna(e1pred):
-                    e1pred = 0.0
-                e3pred = row.get('EPRX3_prediction', 0.0)
-                if pd.isna(e3pred):
-                    e3pred = 0.0
-                imb = row.get('imbalance', 0.0)
-                if pd.isna(imb):
-                    imb = 0.0
-                
-                # Charging cost (NO TAX - exactly like Streamlit)
-                cost_c = jpred * (charge[i] * half_power_kWh / (1 - wheeling_loss_rate))
-                
-                # Discharging revenue (NO TAX - exactly like Streamlit) 
-                rev_d = jpred * (discharge[i] * half_power_kWh * (1 - battery_loss_rate))
-                
-                # EPRX1 revenue (NO TAX - exactly like Streamlit)
-                rev_e1 = e1pred * battery_power_kW * is_in_block[i]
-                
-                # EPRX3 revenue (ONLY TAX applied here - exactly like Streamlit)
-                rev_e3 = TAX * is_eprx3[i] * (battery_power_kW * e3pred + half_power_kWh * (1 - battery_loss_rate) * imb)
-                
-                slot_profit = -cost_c + rev_d + rev_e1 + rev_e3
-                profit_terms.append(slot_profit)
+            slot_profit = -cost_c + rev_d + rev_e1 + rev_e3
+            profit_terms.append(slot_profit)
         
         prob += pulp.lpSum(profit_terms)
         
@@ -498,7 +434,7 @@ class OptimizationEngine(QThread):
             action = "idle"  # Default action
             
             # Check EPRX1 first (if not in simple mode)
-            if DEBUG_MODE != 'simple' and pulp.value(is_in_block[i]) > 0.5:
+            if pulp.value(is_in_block[i]) > 0.5:
                 action = "eprx1"
             # Check EPRX3
             elif pulp.value(is_eprx3[i]) > 0.5:

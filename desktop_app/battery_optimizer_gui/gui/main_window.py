@@ -10,22 +10,25 @@ import os
 from pathlib import Path
 import pandas as pd
 from typing import Optional, Dict, Any
+import json
+import asyncio
+from datetime import datetime, timedelta
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QComboBox, QPushButton, QFileDialog, QTextEdit,
     QProgressBar, QSplitter, QFrame, QGroupBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QScrollArea,
-    QStatusBar, QDateEdit, QButtonGroup, QRadioButton
+    QStatusBar, QDateEdit, QButtonGroup, QRadioButton, QPlainTextEdit,
+    QCheckBox
 )
-from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot, QDate
+from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot, QDate, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QAction, QIcon
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
-from datetime import datetime, timedelta
 
 # Configure matplotlib for Japanese fonts
 plt.rcParams['font.family'] = 'DejaVu Sans'
@@ -51,6 +54,56 @@ from config.area_config import (
     DEFAULT_OPTIMIZATION_PARAMS, validate_optimization_params
 )
 
+# Import OpenAI for chatbot
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+
+class ChatBotWorker(QThread):
+    """Worker thread for OpenAI API calls"""
+    response_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self, api_key: str, messages: list, optimization_data: dict = None):
+        super().__init__()
+        self.api_key = api_key
+        self.messages = messages
+        self.optimization_data = optimization_data
+        
+    def run(self):
+        try:
+            client = openai.OpenAI(api_key=self.api_key)
+            
+            # Add system message with optimization data context
+            system_message = {
+                "role": "system",
+                "content": f"""あなたは Battery Optimizer の専門アシスタントです。
+                
+最適化結果データがある場合、以下の情報を参照して回答してください：
+
+{json.dumps(self.optimization_data, indent=2, ensure_ascii=False) if self.optimization_data else '最適化結果データはまだありません。'}
+
+ユーザーの質問に対して、最適化結果を具体的に分析して、日本語で分かりやすく回答してください。
+数値は適切に丸めて表示し、グラフの傾向や収益性について詳細に説明してください。"""
+            }
+            
+            messages_with_context = [system_message] + self.messages
+            
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages_with_context,
+                max_tokens=1500,
+                temperature=0.7
+            )
+            
+            self.response_ready.emit(response.choices[0].message.content)
+            
+        except Exception as e:
+            self.error_occurred.emit(f"エラー: {str(e)}")
+
 
 class BatteryOptimizerMainWindow(QMainWindow):
     """Main window for the Battery Optimizer application"""
@@ -61,6 +114,8 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.optimization_engine = None
         self.optimization_results = None
         self.current_data = None
+        self.chat_messages = []
+        self.chatbot_worker = None
         
         # Date range selection variables
         self.date_range_start = None
@@ -138,6 +193,13 @@ class BatteryOptimizerMainWindow(QMainWindow):
         reset_action = QAction('パラメータリセット', self)
         reset_action.triggered.connect(self.reset_parameters)
         edit_menu.addAction(reset_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu('設定')
+        
+        api_action = QAction('OpenAI API設定...', self)
+        api_action.triggered.connect(self.show_api_settings)
+        settings_menu.addAction(api_action)
         
         # View menu
         view_menu = menubar.addMenu('表示')
@@ -326,23 +388,6 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.degradation_input.setDecimals(1)
         layout.addWidget(self.degradation_input, 6, 1)
         
-        # Performance mode selection
-        layout.addWidget(QLabel("パフォーマンスモード:"), 7, 0)
-        self.performance_mode_combo = QComboBox()
-        self.performance_mode_combo.addItems([
-            "高速モード (simple)",
-            "標準モード (basic)", 
-            "完全モード (full)"
-        ])
-        self.performance_mode_combo.setCurrentIndex(0)  # Default to simple mode for best performance
-        self.performance_mode_combo.currentTextChanged.connect(self.on_performance_mode_changed)
-        self.performance_mode_combo.setToolTip(
-            "高速モード: EPRX1制約なし、最高速度（推奨）\n"
-            "標準モード: 簡易EPRX1制約、バランス型\n"
-            "完全モード: 全EPRX1制約、Streamlit完全一致（大容量データで低速）"
-        )
-        layout.addWidget(self.performance_mode_combo, 7, 1)
-        
         return group
         
     def create_file_group(self):
@@ -462,6 +507,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
         viz_tab = self.create_visualization_tab()
         self.tab_widget.addTab(viz_tab, "グラフ")
         
+        # Revenue Details tab (NEW!)
+        revenue_tab = self.create_revenue_details_tab()
+        self.tab_widget.addTab(revenue_tab, "収益詳細")
+        
         # Results table tab
         table_tab = self.create_table_tab()
         self.tab_widget.addTab(table_tab, "詳細データ")
@@ -470,9 +519,79 @@ class BatteryOptimizerMainWindow(QMainWindow):
         summary_tab = self.create_summary_tab()
         self.tab_widget.addTab(summary_tab, "サマリー")
         
+        # ChatBot tab (NEW!)
+        if OPENAI_AVAILABLE:
+            chat_tab = self.create_chatbot_tab()
+            self.tab_widget.addTab(chat_tab, "AI分析チャット")
+        
         layout.addWidget(self.tab_widget)
         
+        # Initialize with empty charts
+        self.init_empty_chart()
+        
         return panel
+        
+    def create_revenue_details_tab(self):
+        """Create revenue details visualization tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # Create matplotlib figure for revenue details
+        self.revenue_figure = Figure(figsize=(12, 8))
+        self.revenue_canvas = FigureCanvas(self.revenue_figure)
+        layout.addWidget(self.revenue_canvas)
+        
+        # Initialize empty revenue chart
+        self.init_empty_revenue_chart()
+        
+        return tab
+        
+    def create_chatbot_tab(self):
+        """Create AI chatbot tab"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        
+        # API Key status
+        api_status_layout = QHBoxLayout()
+        self.api_status_label = QLabel("API状態: ")
+        api_status_layout.addWidget(self.api_status_label)
+        
+        api_settings_btn = QPushButton("API設定")
+        api_settings_btn.clicked.connect(self.show_api_settings)
+        api_status_layout.addWidget(api_settings_btn)
+        api_status_layout.addStretch()
+        
+        layout.addLayout(api_status_layout)
+        
+        # Chat display area
+        self.chat_display = QTextEdit()
+        self.chat_display.setReadOnly(True)
+        self.chat_display.setFont(QFont("システムフォント", 12))
+        layout.addWidget(self.chat_display)
+        
+        # Input area
+        input_layout = QHBoxLayout()
+        
+        self.chat_input = QLineEdit()
+        self.chat_input.setPlaceholderText("最適化結果について質問してください... (例: 最も収益の高い時間帯は？)")
+        self.chat_input.returnPressed.connect(self.send_chat_message)
+        input_layout.addWidget(self.chat_input)
+        
+        self.send_button = QPushButton("送信")
+        self.send_button.clicked.connect(self.send_chat_message)
+        input_layout.addWidget(self.send_button)
+        
+        layout.addLayout(input_layout)
+        
+        # Clear chat button
+        clear_btn = QPushButton("チャット履歴をクリア")
+        clear_btn.clicked.connect(self.clear_chat)
+        layout.addWidget(clear_btn)
+        
+        # Update API status
+        self.update_api_status()
+        
+        return tab
         
     def create_visualization_tab(self):
         """Create visualization tab"""
@@ -630,18 +749,6 @@ class BatteryOptimizerMainWindow(QMainWindow):
             # Ensure start date is before end date
             if start_date > end_date:
                 self.end_date_edit.setDate(self.start_date_edit.date())
-    
-    def on_performance_mode_changed(self):
-        """Handle performance mode change"""
-        current_mode = self.performance_mode_combo.currentText()
-        
-        if "simple" in current_mode:
-            self.add_log_message("💨 高速モード選択: EPRX1制約なしで最高速度")
-        elif "basic" in current_mode:
-            self.add_log_message("⚡ 標準モード選択: 簡易EPRX1制約、バランス型（推奨）")
-        elif "full" in current_mode:
-            self.add_log_message("🔧 完全モード選択: 全EPRX1制約、Streamlit完全一致（大容量データで低速）")
-            self.add_log_message("⚠️  完全モードは大容量データで時間がかかる場合があります")
     
     def get_filtered_data(self, df):
         """Filter data based on selected date range"""
@@ -845,17 +952,6 @@ class BatteryOptimizerMainWindow(QMainWindow):
         # Parse area selection to get the correct area name
         area_number, area_name = parse_area_selection(self.area_combo.currentText())
         
-        # Map performance mode to debug mode
-        mode_text = self.performance_mode_combo.currentText()
-        if "simple" in mode_text:
-            debug_mode = 'simple'
-        elif "basic" in mode_text:
-            debug_mode = 'basic'
-        elif "full" in mode_text:
-            debug_mode = 'full'
-        else:
-            debug_mode = 'basic'  # Default fallback
-            
         # Create parameters dictionary
         params = {
             'target_area_name': area_name,  # Use parsed area name (e.g., "Tokyo" not "3: Tokyo")
@@ -870,7 +966,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
             'eprx1_block_size': self.eprx1_block_input.value(),
             'eprx1_block_cooldown': self.eprx1_cooldown_input.value(),
             'max_daily_eprx1_slots': self.max_eprx1_input.value(),
-            'debug_mode': debug_mode  # Use selected performance mode
+            'debug_mode': 'full',
         }
         
         return params
@@ -932,65 +1028,189 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.status_label.setText("待機中...")
         
     def update_results_display(self):
-        """Update results display in table and summary tabs"""
+        """Update all result displays"""
         if not self.optimization_results:
             return
             
-        results_data = self.optimization_results['results']
-        summary_data = self.optimization_results['summary']
-        
-        # Update table
-        self.populate_results_table(results_data)
-        
-        # Update summary
-        self.populate_summary_display(summary_data)
-        
-    def populate_results_table(self, results_data):
-        """Populate the results table"""
-        if not results_data:
+        try:
+            # Update existing displays
+            self.populate_results_table(self.optimization_results['results'])
+            self.populate_summary_display(self.optimization_results['summary'])
+            self.update_visualization()
+            self.update_revenue_details()  # NEW!
+            
+            # Show first tab (graphs) after completion
+            self.tab_widget.setCurrentIndex(0)
+            
+        except Exception as e:
+            self.add_log_message(f"結果表示エラー: {str(e)}")
+            
+    def update_revenue_details(self):
+        """Update revenue details visualization"""
+        if not self.optimization_results:
+            self.init_empty_revenue_chart()
             return
             
-        df = pd.DataFrame(results_data)
-        
-        self.results_table.setRowCount(len(df))
-        self.results_table.setColumnCount(len(df.columns))
-        self.results_table.setHorizontalHeaderLabels(df.columns)
-        
-        for i, row in df.iterrows():
-            for j, value in enumerate(row):
-                item = QTableWidgetItem(str(value))
-                self.results_table.setItem(i, j, item)
+        try:
+            results_data = self.optimization_results['results']
+            if not results_data:
+                self.init_empty_revenue_chart()
+                return
                 
-    def populate_summary_display(self, summary_data):
-        """Populate the summary display"""
-        if not summary_data:
-            return
+            # Get filtered data
+            df = pd.DataFrame(results_data)
+            df = self.get_filtered_data(df)
             
-        summary_text = "=== 最適化結果サマリー ===\n\n"
-        
-        for key, value in summary_data.items():
-            if isinstance(value, (int, float)):
-                if 'Profit' in key or 'Fee' in key or 'Charge' in key:
-                    summary_text += f"{key}: ¥{value:,.0f}\n"
-                elif 'kWh' in key:
-                    summary_text += f"{key}: {value:,.1f} kWh\n"
-                else:
-                    summary_text += f"{key}: {value:,.2f}\n"
+            if df.empty:
+                self.init_empty_revenue_chart()
+                return
+                
+            # Prepare data for visualization
+            df['datetime'] = pd.to_datetime(df['date']) + pd.to_timedelta((df['slot'] - 1) * 0.5, unit='h')
+            
+            # Clear previous plots
+            self.revenue_figure.clear()
+            
+            # Create subplots
+            gs = self.revenue_figure.add_gridspec(3, 2, hspace=0.4, wspace=0.3)
+            
+            # 1. Hourly Revenue Breakdown
+            ax1 = self.revenue_figure.add_subplot(gs[0, :])
+            
+            # Calculate total hourly PnL
+            df['total_pnl'] = df['JEPX_PnL'] + df['EPRX1_PnL'] + df['EPRX3_PnL']
+            hourly_pnl = df.groupby(df['datetime'].dt.hour)['total_pnl'].sum()
+            
+            bars = ax1.bar(hourly_pnl.index, hourly_pnl.values, 
+                          color=['green' if x > 0 else 'red' for x in hourly_pnl.values],
+                          alpha=0.7, edgecolor='black', linewidth=0.5)
+            ax1.set_title('時間別収益分布', fontsize=14, fontweight='bold')
+            ax1.set_xlabel('時間')
+            ax1.set_ylabel('収益 (円)')
+            ax1.grid(True, alpha=0.3)
+            ax1.set_xticks(range(0, 24, 2))
+            
+            # Add value labels on bars
+            for bar in bars:
+                height = bar.get_height()
+                if abs(height) > max(abs(hourly_pnl.values)) * 0.02:  # Only label significant bars
+                    ax1.text(bar.get_x() + bar.get_width()/2., height/2,
+                            f'{int(height):,}', ha='center', va='center', fontsize=8)
+            
+            # 2. Market Contribution Analysis
+            ax2 = self.revenue_figure.add_subplot(gs[1, 0])
+            
+            market_totals = {
+                'JEPX': df['JEPX_PnL'].sum(),
+                'EPRX1': df['EPRX1_PnL'].sum(), 
+                'EPRX3': df['EPRX3_PnL'].sum()
+            }
+            
+            # Filter out zero contributions
+            market_totals = {k: v for k, v in market_totals.items() if abs(v) > 1}
+            
+            if market_totals:
+                colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
+                wedges, texts, autotexts = ax2.pie(
+                    market_totals.values(), 
+                    labels=market_totals.keys(),
+                    autopct=lambda pct: f'{pct:.1f}%\n({int(pct/100 * sum(market_totals.values())):,}円)',
+                    colors=colors,
+                    startangle=90
+                )
+                ax2.set_title('市場別収益貢献', fontsize=12, fontweight='bold')
+                
+                # Improve text readability
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(9)
             else:
-                summary_text += f"{key}: {value}\n"
-                
-        self.summary_text.setText(summary_text)
+                ax2.text(0.5, 0.5, 'データなし', ha='center', va='center', transform=ax2.transAxes)
+                ax2.set_title('市場別収益貢献', fontsize=12, fontweight='bold')
+            
+            # 3. Action Distribution
+            ax3 = self.revenue_figure.add_subplot(gs[1, 1])
+            
+            action_counts = df['action'].value_counts()
+            colors_action = {'charge': '#FF9999', 'discharge': '#99FF99', 'eprx1': '#9999FF', 
+                           'eprx3': '#FFFF99', 'idle': '#CCCCCC'}
+            
+            wedges, texts, autotexts = ax3.pie(
+                action_counts.values,
+                labels=action_counts.index,
+                autopct='%1.1f%%',
+                colors=[colors_action.get(action, '#CCCCCC') for action in action_counts.index],
+                startangle=90
+            )
+            ax3.set_title('アクション分布', fontsize=12, fontweight='bold')
+            
+            # 4. Daily Revenue Trend
+            ax4 = self.revenue_figure.add_subplot(gs[2, :])
+            
+            daily_pnl = df.groupby('date')['total_pnl'].sum()
+            daily_pnl.index = pd.to_datetime(daily_pnl.index)
+            
+            # Line plot with markers
+            ax4.plot(daily_pnl.index, daily_pnl.values, marker='o', linewidth=2, 
+                    markersize=6, color='#007AFF', markerfacecolor='white', markeredgecolor='#007AFF')
+            
+            # Fill positive/negative areas
+            ax4.fill_between(daily_pnl.index, daily_pnl.values, 0, 
+                           where=(daily_pnl.values > 0), color='green', alpha=0.3, label='利益')
+            ax4.fill_between(daily_pnl.index, daily_pnl.values, 0,
+                           where=(daily_pnl.values <= 0), color='red', alpha=0.3, label='損失')
+            
+            ax4.set_title('日別収益推移', fontsize=12, fontweight='bold')
+            ax4.set_xlabel('日付')
+            ax4.set_ylabel('収益 (円)')
+            ax4.grid(True, alpha=0.3)
+            ax4.legend()
+            
+            # Format x-axis dates
+            if len(daily_pnl) > 7:
+                ax4.xaxis.set_major_locator(mdates.WeekdayLocator())
+                ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+            else:
+                ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+            
+            # Rotate labels for better readability
+            plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            
+            # Add overall statistics text
+            total_profit = df['total_pnl'].sum()
+            avg_daily_profit = daily_pnl.mean()
+            best_day = daily_pnl.idxmax()
+            best_day_profit = daily_pnl.max()
+            
+            stats_text = f"""収益サマリー ({self.get_date_range_title()}):
+• 総収益: {total_profit:,.0f}円
+• 平均日収: {avg_daily_profit:,.0f}円
+• 最高収益日: {best_day.strftime('%m/%d')} ({best_day_profit:,.0f}円)"""
+            
+            self.revenue_figure.text(0.02, 0.98, stats_text, transform=self.revenue_figure.transFigure,
+                                   fontsize=10, verticalalignment='top', fontweight='bold',
+                                   bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
+            
+            # Overall title
+            period_title = f"収益詳細分析 - {self.get_date_range_title()}"
+            self.revenue_figure.suptitle(period_title, fontsize=16, fontweight='bold', y=0.95)
+            
+            self.revenue_canvas.draw()
+            
+        except Exception as e:
+            self.add_log_message(f"収益詳細グラフ更新エラー: {str(e)}")
+            self.init_empty_revenue_chart()
         
-    def init_empty_chart(self):
-        """Initialize empty chart"""
-        self.figure.clear()
-        ax = self.figure.add_subplot(111)
-        ax.text(0.5, 0.5, "最適化結果が表示されます", 
-                ha='center', va='center', transform=ax.transAxes,
-                fontsize=16, color='gray')
-        ax.set_xticks([])
-        ax.set_yticks([])
-        self.canvas.draw()
+    def init_empty_revenue_chart(self):
+        """Initialize empty revenue details chart"""
+        self.revenue_figure.clear()
+        ax = self.revenue_figure.add_subplot(111)
+        ax.text(0.5, 0.5, '最適化結果がありません\n最適化を実行すると収益詳細グラフが表示されます', 
+                horizontalalignment='center', verticalalignment='center', 
+                transform=ax.transAxes, fontsize=14, color='gray')
+        ax.set_title('収益詳細分析')
+        self.revenue_canvas.draw()
         
     def update_visualization(self):
         """Update the visualization chart"""
@@ -1206,4 +1426,221 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 
         # Save settings
         self.save_settings()
-        event.accept() 
+        event.accept()
+        
+    def show_api_settings(self):
+        """Show OpenAI API settings dialog"""
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("OpenAI API設定")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        
+        current_key = self.settings.value("openai_api_key", "")
+        masked_key = "sk-..." + current_key[-4:] if current_key and len(current_key) > 7 else "未設定"
+        
+        dialog.setText(f"現在のAPIキー: {masked_key}")
+        dialog.setInformativeText("新しいOpenAI APIキーを入力してください:")
+        
+        # Custom dialog with input field
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLineEdit, QDialogButtonBox
+        
+        api_dialog = QDialog(self)
+        api_dialog.setWindowTitle("OpenAI API設定")
+        api_dialog.setModal(True)
+        api_dialog.resize(400, 150)
+        
+        layout = QVBoxLayout(api_dialog)
+        
+        layout.addWidget(QLabel("OpenAI APIキーを入力してください:"))
+        
+        api_input = QLineEdit()
+        api_input.setPlaceholderText("sk-...")
+        api_input.setText(current_key)
+        api_input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(api_input)
+        
+        show_key_checkbox = QCheckBox("APIキーを表示")
+        show_key_checkbox.toggled.connect(
+            lambda checked: api_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+        )
+        layout.addWidget(show_key_checkbox)
+        
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(api_dialog.accept)
+        buttons.rejected.connect(api_dialog.reject)
+        layout.addWidget(buttons)
+        
+        if api_dialog.exec() == QDialog.DialogCode.Accepted:
+            api_key = api_input.text().strip()
+            if api_key:
+                self.settings.setValue("openai_api_key", api_key)
+                self.update_api_status()
+                QMessageBox.information(self, "設定完了", "OpenAI APIキーが保存されました。")
+            else:
+                self.settings.remove("openai_api_key")
+                self.update_api_status()
+                QMessageBox.information(self, "設定削除", "OpenAI APIキーが削除されました。")
+                
+    def update_api_status(self):
+        """Update API status display"""
+        if not OPENAI_AVAILABLE:
+            self.api_status_label.setText("API状態: openaiライブラリが未インストール")
+            self.api_status_label.setStyleSheet("color: red;")
+            return
+            
+        api_key = self.settings.value("openai_api_key", "")
+        if api_key:
+            self.api_status_label.setText("API状態: 設定済み ✓")
+            self.api_status_label.setStyleSheet("color: green;")
+        else:
+            self.api_status_label.setText("API状態: 未設定")
+            self.api_status_label.setStyleSheet("color: orange;")
+            
+    def send_chat_message(self):
+        """Send message to chatbot"""
+        if not OPENAI_AVAILABLE:
+            QMessageBox.warning(self, "エラー", "openaiライブラリがインストールされていません。\npip install openai を実行してください。")
+            return
+            
+        api_key = self.settings.value("openai_api_key", "")
+        if not api_key:
+            QMessageBox.warning(self, "API未設定", "OpenAI APIキーが設定されていません。\n設定メニューから設定してください。")
+            return
+            
+        message = self.chat_input.text().strip()
+        if not message:
+            return
+            
+        # Add user message to chat
+        self.chat_messages.append({"role": "user", "content": message})
+        self.display_chat_message("ユーザー", message, is_user=True)
+        self.chat_input.clear()
+        
+        # Disable input while processing
+        self.chat_input.setEnabled(False)
+        self.send_button.setEnabled(False)
+        self.send_button.setText("送信中...")
+        
+        # Prepare optimization data for context
+        optimization_context = None
+        if self.optimization_results:
+            # Create a summary of optimization results for the AI
+            optimization_context = {
+                "summary": self.optimization_results.get("summary", {}),
+                "total_rows": len(self.optimization_results.get("results", [])),
+                "date_range": self.get_date_range_title(),
+                "recent_results": self.optimization_results.get("results", [])[-10:] if self.optimization_results.get("results") else []
+            }
+        
+        # Start chatbot worker
+        self.chatbot_worker = ChatBotWorker(
+            api_key=api_key,
+            messages=self.chat_messages.copy(),
+            optimization_data=optimization_context
+        )
+        self.chatbot_worker.response_ready.connect(self.on_chat_response)
+        self.chatbot_worker.error_occurred.connect(self.on_chat_error)
+        self.chatbot_worker.start()
+        
+    def on_chat_response(self, response):
+        """Handle chatbot response"""
+        self.chat_messages.append({"role": "assistant", "content": response})
+        self.display_chat_message("AI分析", response, is_user=False)
+        
+        # Re-enable input
+        self.chat_input.setEnabled(True)
+        self.send_button.setEnabled(True)
+        self.send_button.setText("送信")
+        
+    def on_chat_error(self, error):
+        """Handle chatbot error"""
+        self.display_chat_message("エラー", error, is_user=False, is_error=True)
+        
+        # Re-enable input
+        self.chat_input.setEnabled(True)
+        self.send_button.setEnabled(True)
+        self.send_button.setText("送信")
+        
+    def display_chat_message(self, sender, message, is_user=False, is_error=False):
+        """Display chat message in the chat area"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        if is_error:
+            color = "red"
+            prefix = "❌"
+        elif is_user:
+            color = "#007AFF"
+            prefix = "👤"
+        else:
+            color = "#34C759"
+            prefix = "🤖"
+            
+        formatted_message = f"""
+        <div style="margin: 10px 0; padding: 10px; border-left: 3px solid {color}; background-color: {'#f8f9fa' if not is_user else '#e3f2fd'};">
+            <strong style="color: {color};">{prefix} {sender}</strong> 
+            <span style="color: gray; font-size: 12px;">[{timestamp}]</span><br/>
+            <div style="margin-top: 5px; white-space: pre-wrap;">{message}</div>
+        </div>
+        """
+        
+        self.chat_display.append(formatted_message)
+        
+        # Scroll to bottom
+        scrollbar = self.chat_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+    def clear_chat(self):
+        """Clear chat history"""
+        self.chat_messages.clear()
+        self.chat_display.clear()
+        self.chat_display.append("<p style='color: gray; text-align: center;'>チャット履歴がクリアされました。</p>")
+        
+    def init_empty_chart(self):
+        """Initialize empty chart"""
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        ax.text(0.5, 0.5, "最適化結果が表示されます", 
+                ha='center', va='center', transform=ax.transAxes,
+                fontsize=16, color='gray')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        self.canvas.draw()
+        
+    def populate_results_table(self, results_data):
+        """Populate the results table"""
+        if not results_data:
+            return
+            
+        df = pd.DataFrame(results_data)
+    
+        self.results_table.setRowCount(len(df))
+        self.results_table.setColumnCount(len(df.columns))
+        self.results_table.setHorizontalHeaderLabels(df.columns)
+        
+        for i, row in df.iterrows():
+            for j, value in enumerate(row):
+                item = QTableWidgetItem(str(value))
+                self.results_table.setItem(i, j, item)
+                
+    def populate_summary_display(self, summary_data):
+        """Populate the summary display"""
+        if not summary_data:
+            return
+            
+        summary_text = "=== 最適化結果サマリー ===\n\n"
+        
+        for key, value in summary_data.items():
+            if isinstance(value, (int, float)):
+                if 'Profit' in key or 'Fee' in key or 'Charge' in key:
+                    summary_text += f"{key}: ¥{value:,.0f}\n"
+                elif 'kWh' in key:
+                    summary_text += f"{key}: {value:,.1f} kWh\n"
+                else:
+                    summary_text += f"{key}: {value:,.2f}\n"
+            else:
+                summary_text += f"{key}: {value}\n"
+                
+        self.summary_text.setText(summary_text) 
