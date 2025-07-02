@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSplitter, QFrame, QGroupBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QScrollArea,
     QStatusBar, QDateEdit, QButtonGroup, QRadioButton, QPlainTextEdit,
-    QCheckBox, QDialog, QFormLayout, QDialogButtonBox
+    QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QCalendarWidget
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot, QDate, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QAction, QIcon
@@ -58,6 +58,7 @@ except:
 
 # Import our custom modules
 from core.optimization_engine import OptimizationEngine
+from core.optimization_engine_v2 import OptimizationEngineV2
 from config.area_config import (
     get_area_list, get_voltage_list, parse_area_selection,
     DEFAULT_OPTIMIZATION_PARAMS, validate_optimization_params
@@ -122,6 +123,69 @@ def convert_numpy_types(obj):
     except Exception as e:
         # If conversion fails, return string representation
         return str(obj)
+
+
+class CalendarDialog(QDialog):
+    """Calendar widget dialog for date selection"""
+    
+    def __init__(self, parent=None, title="日付選択", current_date=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(350, 300)
+        
+        # Store selected date
+        self.selected_date = current_date or QDate.currentDate()
+        
+        self.init_ui()
+        
+    def init_ui(self):
+        """Initialize calendar dialog UI"""
+        layout = QVBoxLayout(self)
+        
+        # Calendar widget
+        self.calendar = QCalendarWidget()
+        self.calendar.setSelectedDate(self.selected_date)
+        self.calendar.clicked.connect(self.on_date_selected)
+        layout.addWidget(self.calendar)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        
+        # Today button
+        today_button = QPushButton("今日")
+        today_button.clicked.connect(self.select_today)
+        button_layout.addWidget(today_button)
+        
+        button_layout.addStretch()
+        
+        # OK and Cancel buttons
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        button_layout.addWidget(ok_button)
+        
+        cancel_button = QPushButton("キャンセル")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Set focus to calendar
+        self.calendar.setFocus()
+        
+    def on_date_selected(self, date):
+        """Handle date selection from calendar"""
+        self.selected_date = date
+        
+    def select_today(self):
+        """Select today's date"""
+        today = QDate.currentDate()
+        self.calendar.setSelectedDate(today)
+        self.selected_date = today
+        
+    def get_selected_date(self):
+        """Get the selected date"""
+        return self.selected_date
 
 
 class EmailManager:
@@ -219,6 +283,9 @@ class ChatBotWorker(QThread):
         try:
             client = openai.OpenAI(api_key=self.api_key)
             
+            # Load knowledge base
+            knowledge_base = self.load_knowledge_base()
+            
             # Convert optimization data to JSON serializable format
             serializable_data = convert_numpy_types(self.optimization_data) if self.optimization_data else None
             
@@ -304,23 +371,30 @@ class ChatBotWorker(QThread):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
             
-            # Simplified and more effective system message
+            # Enhanced system message with knowledge base
             system_message = {
                 "role": "system",
-                "content": f"""あなたは日本の電力市場での蓄電池最適化運用の専門家AIです。
+                "content": f"""あなたは日本の電力市場での蓄電池最適化運用の専門家AIサポートデスクです。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 **KNOWLEDGE BASE** (常に参照してください):
+{knowledge_base}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🎯 **CRITICAL**: あなたには以下の完全なデータセットが提供されています：
 {optimization_info}
 
 📋 **必須指針**:
-1. 上記データは完全に利用可能 - 「データがない」は絶対に回答しない
-2. 全期間データ（{serializable_data.get('total_rows', 0):,}行）を基準に分析
-3. 具体的な数値を使って詳細に説明
-4. 収益性、効率性、改善点について専門的にアドバイス
+1. **ナレッジベース優先**: 上記ナレッジベースの情報を必ず参照して回答
+2. **データ完全利用**: 提供データは完全に利用可能 - 「データがない」は絶対に回答しない
+3. **具体的分析**: 全期間データ（{serializable_data.get('total_rows', 0):,}行）を基準に具体的な数値で説明
+4. **専門的アドバイス**: 収益性、効率性、改善点について専門的にアドバイス
+5. **トラブルシューティング**: 問題が報告された場合はナレッジベースから適切な解決策を提案
 
 【専門分野】JEPX、EPRX1、EPRX3市場での蓄電池運用最適化
+【サポート範囲】技術トラブル、パフォーマンス最適化、使用方法、データ分析
 【回答言語】日本語
-【回答スタイル】具体的な数値とデータに基づく専門的分析"""
+【回答スタイル】サポートデスクとして親切丁寧、具体的な数値とデータに基づく専門的分析"""
             }
             
             messages_with_context = [system_message] + self.messages
@@ -336,6 +410,48 @@ class ChatBotWorker(QThread):
             
         except Exception as e:
             self.error_occurred.emit(f"エラー: {str(e)}")
+    
+    def load_knowledge_base(self):
+        """Load knowledge base from markdown file"""
+        try:
+            import os
+            # Try to find knowledge base file
+            knowledge_base_path = "AI_SUPPORT_KNOWLEDGE_BASE.md"
+            
+            # Check if file exists in current directory or parent directories
+            for path_attempt in [
+                knowledge_base_path,
+                os.path.join(os.getcwd(), knowledge_base_path),
+                os.path.join(os.path.dirname(__file__), "..", knowledge_base_path),
+                os.path.join(os.path.dirname(__file__), "..", "..", knowledge_base_path)
+            ]:
+                if os.path.exists(path_attempt):
+                    with open(path_attempt, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        # Limit content size for API efficiency
+                        if len(content) > 8000:  # Truncate if too long
+                            content = content[:8000] + "\n\n[... ナレッジベースが長いため省略 ...]"
+                        return content
+            
+            # If no knowledge base found, return basic information
+            return """
+# Battery Optimizer サポートガイド (簡易版)
+
+## よくある問題
+1. CBCソルバーエラー: `python setup.py` で自動修復
+2. 最適化が遅い: 高速モード(V1)を選択
+3. データ読み込みエラー: CSVフォーマットを確認
+
+## パフォーマンスモード
+- V1 (高速): EPRX1制約なし、最高速度
+- V2-basic (標準): 簡易EPRX1制約
+- V2-full (完全): 全制約、Streamlit準拠
+
+## データ要件
+必須列: date, slot, JEPX_prediction, JEPX_actual, EPRX1_prediction, EPRX1_actual, EPRX3_prediction, EPRX3_actual, imbalance
+"""
+        except Exception as e:
+            return f"ナレッジベース読み込みエラー: {str(e)}"
 
 
 class BatteryOptimizerMainWindow(QMainWindow):
@@ -600,14 +716,29 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.capacity_input.setSuffix(" kWh")
         layout.addWidget(self.capacity_input, 3, 1)
         
+        # Initial battery level (NEW!)
+        layout.addWidget(QLabel("初期蓄電量 (kWh):"), 4, 0)
+        self.initial_battery_input = QSpinBox()
+        self.initial_battery_input.setRange(0, 1000000)
+        self.initial_battery_input.setValue(2000)  # Default to 50% of default capacity
+        self.initial_battery_input.setSuffix(" kWh")
+        self.initial_battery_input.setToolTip("V2エンジン使用時：最初の日の開始時のバッテリー蓄電量（kWh）\nV1エンジンでは無視され、容量の50%から開始します")
+        layout.addWidget(self.initial_battery_input, 4, 1)
+        
+        # Connect capacity change to update initial battery max value
+        self.capacity_input.valueChanged.connect(self.update_initial_battery_max)
+        
+        # Set initial maximum for initial battery input
+        self.update_initial_battery_max()
+        
         # Battery loss rate
-        layout.addWidget(QLabel("バッテリー損失率 (%):"), 4, 0)
+        layout.addWidget(QLabel("バッテリー損失率 (%):"), 5, 0)
         self.loss_rate_input = QDoubleSpinBox()
         self.loss_rate_input.setRange(0.0, 50.0)
         self.loss_rate_input.setValue(5.0)
         self.loss_rate_input.setSuffix(" %")
         self.loss_rate_input.setDecimals(2)
-        layout.addWidget(self.loss_rate_input, 4, 1)
+        layout.addWidget(self.loss_rate_input, 5, 1)
         
         return group
         
@@ -671,6 +802,34 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.degradation_input.setSuffix(" %")
         self.degradation_input.setDecimals(1)
         layout.addWidget(self.degradation_input, 6, 1)
+        
+        # EPRX3 activation rate
+        layout.addWidget(QLabel("EPRX3発動率:"), 7, 0)
+        self.eprx3_activation_input = QDoubleSpinBox()
+        self.eprx3_activation_input.setRange(0.0, 100.0)
+        self.eprx3_activation_input.setValue(100.0)
+        self.eprx3_activation_input.setSuffix(" %")
+        self.eprx3_activation_input.setDecimals(1)
+        self.eprx3_activation_input.setToolTip("EPRX3指令が選択された時の実際の発動確率")
+        layout.addWidget(self.eprx3_activation_input, 7, 1)
+        
+        # V1 price ratio
+        layout.addWidget(QLabel("V1価格比率:"), 8, 0)
+        self.v1_price_ratio_input = QDoubleSpinBox()
+        self.v1_price_ratio_input.setRange(0.0, 200.0)
+        self.v1_price_ratio_input.setValue(100.0)
+        self.v1_price_ratio_input.setSuffix(" %")
+        self.v1_price_ratio_input.setDecimals(1)
+        self.v1_price_ratio_input.setToolTip("EPRX3発動時のV1価格をインバランス価格に対する比率で設定")
+        layout.addWidget(self.v1_price_ratio_input, 8, 1)
+        
+        # Engine version selection
+        layout.addWidget(QLabel("エンジン版本:"), 9, 0)
+        self.engine_version_combo = QComboBox()
+        self.engine_version_combo.addItems(["V1 (従来版)", "V2 (EPRX3確率版)"])
+        self.engine_version_combo.setCurrentIndex(0)  # Default to V1
+        self.engine_version_combo.setToolTip("V1: 従来の100%発動版, V2: EPRX3確率&V1価格版")
+        layout.addWidget(self.engine_version_combo, 9, 1)
         
         return group
         
@@ -952,6 +1111,30 @@ class BatteryOptimizerMainWindow(QMainWindow):
         
         layout.addLayout(input_layout)
         
+        # Quick help and clear buttons
+        bottom_buttons_layout = QHBoxLayout()
+        
+        # Quick help button
+        quick_help_btn = QPushButton("💡 よくある質問")
+        quick_help_btn.clicked.connect(self.show_quick_help)
+        quick_help_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFC107;
+                color: #333;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FFB300;
+            }
+        """)
+        quick_help_btn.setToolTip("よくある質問とサンプル質問を表示")
+        bottom_buttons_layout.addWidget(quick_help_btn)
+        
+        bottom_buttons_layout.addStretch()
+        
         # Clear chat button
         clear_btn = QPushButton("チャット履歴をクリア")
         clear_btn.clicked.connect(self.clear_chat)
@@ -967,7 +1150,9 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 background-color: #e0e0e0;
             }
         """)
-        layout.addWidget(clear_btn)
+        bottom_buttons_layout.addWidget(clear_btn)
+        
+        layout.addLayout(bottom_buttons_layout)
         
         # Update API status
         self.update_api_status()
@@ -1013,19 +1198,45 @@ class BatteryOptimizerMainWindow(QMainWindow):
         date_layout.addWidget(self.custom_range_radio, 1, 0)
         
         # Custom date range selectors
+        start_date_layout = QHBoxLayout()
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setEnabled(False)
         self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
         self.start_date_edit.dateChanged.connect(self.on_date_range_changed)
-        date_layout.addWidget(QLabel("開始日:"), 1, 1)
-        date_layout.addWidget(self.start_date_edit, 1, 2)
+        self.start_date_edit.setCalendarPopup(True)  # Enable calendar popup
+        start_date_layout.addWidget(self.start_date_edit)
         
+        self.start_calendar_button = QPushButton("📅")
+        self.start_calendar_button.setEnabled(False)
+        self.start_calendar_button.setMaximumWidth(30)
+        self.start_calendar_button.setToolTip("カレンダーから開始日を選択")
+        self.start_calendar_button.clicked.connect(self.select_start_date)
+        start_date_layout.addWidget(self.start_calendar_button)
+        
+        date_layout.addWidget(QLabel("開始日:"), 1, 1)
+        start_date_widget = QWidget()
+        start_date_widget.setLayout(start_date_layout)
+        date_layout.addWidget(start_date_widget, 1, 2)
+        
+        end_date_layout = QHBoxLayout()
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setEnabled(False)
         self.end_date_edit.setDate(QDate.currentDate())
         self.end_date_edit.dateChanged.connect(self.on_date_range_changed)
+        self.end_date_edit.setCalendarPopup(True)  # Enable calendar popup
+        end_date_layout.addWidget(self.end_date_edit)
+        
+        self.end_calendar_button = QPushButton("📅")
+        self.end_calendar_button.setEnabled(False)
+        self.end_calendar_button.setMaximumWidth(30)
+        self.end_calendar_button.setToolTip("カレンダーから終了日を選択")
+        self.end_calendar_button.clicked.connect(self.select_end_date)
+        end_date_layout.addWidget(self.end_calendar_button)
+        
         date_layout.addWidget(QLabel("終了日:"), 1, 3)
-        date_layout.addWidget(self.end_date_edit, 1, 4)
+        end_date_widget = QWidget()
+        end_date_widget.setLayout(end_date_layout)
+        date_layout.addWidget(end_date_widget, 1, 4)
         
         # Apply button
         apply_button = QPushButton("適用")
@@ -1106,9 +1317,13 @@ class BatteryOptimizerMainWindow(QMainWindow):
         if mode == "range":
             self.start_date_edit.setEnabled(True)
             self.end_date_edit.setEnabled(True)
+            self.start_calendar_button.setEnabled(True)
+            self.end_calendar_button.setEnabled(True)
         else:
             self.start_date_edit.setEnabled(False)
             self.end_date_edit.setEnabled(False)
+            self.start_calendar_button.setEnabled(False)
+            self.end_calendar_button.setEnabled(False)
             
         # Log mode change
         self.add_log_message(f"期間選択モード変更: {old_mode} → {mode}")
@@ -1684,6 +1899,17 @@ class BatteryOptimizerMainWindow(QMainWindow):
             # Validate parameters
             params = validate_optimization_params(params)
             
+            # Select engine version based on user choice
+            engine_version = self.engine_version_combo.currentText()
+            if "V2" in engine_version:
+                self.optimization_engine = OptimizationEngineV2(parent=self)
+                self.add_log_message(f"🚀 V2エンジン使用 - EPRX3発動率: {params['eprx3_activation_rate']:.1f}%, V1価格比率: {params['v1_price_ratio']:.1f}%")
+            else:
+                self.optimization_engine = OptimizationEngine(parent=self)
+                self.add_log_message("🚀 V1エンジン使用 - 従来の100%発動モード")
+            
+            self.connect_optimization_signals()
+            
             # Setup UI for optimization
             self.optimize_button.setEnabled(False)
             self.cancel_button.setEnabled(True)
@@ -1710,6 +1936,14 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.optimization_engine.cancel_optimization()
             self.add_log_message("最適化をキャンセルしています...")
             
+    def update_initial_battery_max(self):
+        """Update the maximum value of initial battery input when capacity changes"""
+        capacity = self.capacity_input.value()
+        self.initial_battery_input.setMaximum(capacity)
+        # Auto-adjust if current value exceeds new capacity
+        if self.initial_battery_input.value() > capacity:
+            self.initial_battery_input.setValue(capacity // 2)  # Set to 50% of new capacity
+
     def collect_parameters(self) -> Dict[str, Any]:
         """Collect parameters from UI"""
         # Parse area selection to get the correct area name
@@ -1721,6 +1955,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
             'voltage_type': self.voltage_combo.currentText(),  # Should be "HV", "LV", or "SHV"
             'battery_power_kW': float(self.power_input.value()),
             'battery_capacity_kWh': float(self.capacity_input.value()),
+            'initial_soc_kwh': float(self.initial_battery_input.value()),  # New parameter for V2 engine
             'battery_loss_rate': float(self.loss_rate_input.value()) / 100,
             'daily_cycle_limit': float(self.daily_cycle_input.value()),
             'yearly_cycle_limit': float(self.yearly_cycle_input.value()),
@@ -1729,6 +1964,8 @@ class BatteryOptimizerMainWindow(QMainWindow):
             'eprx1_block_size': self.eprx1_block_input.value(),
             'eprx1_block_cooldown': self.eprx1_cooldown_input.value(),
             'max_daily_eprx1_slots': self.max_eprx1_input.value(),
+            'eprx3_activation_rate': float(self.eprx3_activation_input.value()),  # New parameter
+            'v1_price_ratio': float(self.v1_price_ratio_input.value()),  # New parameter
             'debug_mode': 'full',
         }
         
@@ -1962,7 +2199,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     if abs(height) > max_val * 0.05:  # Only label bars > 5% of max
                         ax1.text(bar.get_x() + bar.get_width()/2., height/2,
                                 f'{int(height/1000):.0f}K' if abs(height) > 1000 else f'{int(height)}',
-                                ha='center', va='center', fontsize=9, fontweight='bold')
+                                ha='center', va='center', fontsize=6, fontweight='bold')  # Reduced from 9 to 6
                 
                 self.add_log_message("✅ グラフ1完了")
             
@@ -2104,10 +2341,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 ax4.grid(True, alpha=0.3)
                 ax4.legend()
                 
-                # Format x-axis dates based on data span
+                # Format x-axis dates based on data span with shorter year format
                 if len(daily_pnl) > 180:  # More than 6 months
                     ax4.xaxis.set_major_locator(mdates.MonthLocator())
-                    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+                    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%y-%m'))  # Changed from %Y-%m to %y-%m
                 elif len(daily_pnl) > 30:  # More than 1 month
                     ax4.xaxis.set_major_locator(mdates.WeekdayLocator())
                     ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
@@ -2124,8 +2361,8 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 # Add zero line for reference
                 ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.8)
                 
-                # Rotate labels for better readability
-                plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right')
+                # Rotate labels for better readability with smaller font size
+                plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)  # Added fontsize=8
                 
                 # Add overall statistics text (use all data, not sampled)
                 total_profit = df['total_pnl'].sum()
@@ -2274,9 +2511,9 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
                 ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
         
-        # Rotate labels for better readability
+        # Rotate labels for better readability with smaller font size
         for ax in [ax1, ax2]:
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, fontsize=8)  # Added fontsize=8
             
         self.figure.tight_layout()
         self.canvas.draw()
@@ -2338,6 +2575,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.voltage_combo.setCurrentIndex(1)  # HV
             self.power_input.setValue(1000)
             self.capacity_input.setValue(4000)
+            self.initial_battery_input.setValue(2000)  # 50% of default capacity
             self.loss_rate_input.setValue(5.0)
             self.daily_cycle_input.setValue(1)
             self.forecast_period_input.setValue(48)
@@ -2346,6 +2584,9 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.max_eprx1_input.setValue(6)
             self.yearly_cycle_input.setValue(365)
             self.degradation_input.setValue(3.0)
+            self.eprx3_activation_input.setValue(100.0)
+            self.v1_price_ratio_input.setValue(100.0)
+            self.engine_version_combo.setCurrentIndex(0)  # V1 default
             
             self.add_log_message("パラメータをリセットしました")
             
@@ -2632,7 +2873,26 @@ class BatteryOptimizerMainWindow(QMainWindow):
             
         summary_text = "=== 最適化結果サマリー ===\n\n"
         
+        # Add V2 specific information first if available
+        if 'EPRX3_Activation_Rate' in summary_data or 'V1_Price_Ratio' in summary_data:
+            summary_text += "=== V2エンジン設定 ===\n"
+            if 'Initial_SOC_kWh' in summary_data:
+                summary_text += f"初期蓄電量: {summary_data['Initial_SOC_kWh']:.1f} kWh\n"
+            if 'EPRX3_Activation_Rate' in summary_data:
+                summary_text += f"EPRX3発動率: {summary_data['EPRX3_Activation_Rate']:.1f}%\n"
+            if 'V1_Price_Ratio' in summary_data:
+                summary_text += f"V1価格比率: {summary_data['V1_Price_Ratio']:.1f}%\n"
+            if 'EPRX3_Planned_Count' in summary_data:
+                summary_text += f"EPRX3実行回数: {summary_data['EPRX3_Planned_Count']}回\n"
+            summary_text += "\n"
+        
+        summary_text += "=== 財務結果 ===\n"
+        
         for key, value in summary_data.items():
+            # Skip V2 specific fields as they're already shown
+            if key in ['EPRX3_Activation_Rate', 'V1_Price_Ratio', 'EPRX3_Planned_Count', 'Initial_SOC_kWh']:
+                continue
+                
             if isinstance(value, (int, float)):
                 if 'Profit' in key or 'Fee' in key or 'Charge' in key:
                     summary_text += f"{key}: ¥{value:,.0f}\n"
@@ -3630,3 +3890,131 @@ OS: {self.get_system_info()}
         else:
             from config.area_config import RENEWABLE_ENERGY_SURCHARGE
             return RENEWABLE_ENERGY_SURCHARGE
+    
+    def select_start_date(self):
+        """Open calendar dialog to select start date"""
+        try:
+            current_date = self.start_date_edit.date()
+            dialog = CalendarDialog(self, title="開始日選択", current_date=current_date)
+            
+            # Set date range based on available data
+            if hasattr(self, 'csv_data') and self.csv_data is not None:
+                df_dates = pd.to_datetime(self.csv_data['date'])
+                min_date = df_dates.min().date()
+                max_date = df_dates.max().date()
+                
+                dialog.calendar.setMinimumDate(QDate(min_date))
+                dialog.calendar.setMaximumDate(QDate(max_date))
+            
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                selected_date = dialog.get_selected_date()
+                self.start_date_edit.setDate(selected_date)
+                self.add_log_message(f"開始日をカレンダーから選択: {selected_date.toString('yyyy-MM-dd')}")
+                
+                # Auto-update visualization if in range mode
+                if self.date_range_mode == "range" and self.optimization_results:
+                    self.update_visualization()
+                    
+        except Exception as e:
+            self.add_log_message(f"開始日選択エラー: {str(e)}")
+            QMessageBox.warning(self, "カレンダーエラー", f"開始日の選択中にエラーが発生しました:\n{str(e)}")
+    
+    def select_end_date(self):
+        """Open calendar dialog to select end date"""
+        try:
+            current_date = self.end_date_edit.date()
+            dialog = CalendarDialog(self, title="終了日選択", current_date=current_date)
+            
+            # Set date range based on available data
+            if hasattr(self, 'csv_data') and self.csv_data is not None:
+                df_dates = pd.to_datetime(self.csv_data['date'])
+                min_date = df_dates.min().date()
+                max_date = df_dates.max().date()
+                
+                dialog.calendar.setMinimumDate(QDate(min_date))
+                dialog.calendar.setMaximumDate(QDate(max_date))
+            
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                selected_date = dialog.get_selected_date()
+                self.end_date_edit.setDate(selected_date)
+                self.add_log_message(f"終了日をカレンダーから選択: {selected_date.toString('yyyy-MM-dd')}")
+                
+                # Auto-update visualization if in range mode
+                if self.date_range_mode == "range" and self.optimization_results:
+                    self.update_visualization()
+                    
+        except Exception as e:
+            self.add_log_message(f"終了日選択エラー: {str(e)}")
+            QMessageBox.warning(self, "カレンダーエラー", f"終了日の選択中にエラーが発生しました:\n{str(e)}")
+    
+    def show_quick_help(self):
+        """Show quick help with sample questions"""
+        sample_questions = [
+            "最も収益の高い時間帯はいつですか？",
+            "今回の最適化結果の総収益を教えてください",
+            "どのアクション（充電・放電・調整力）が最も多く使われていますか？",
+            "1日の平均収益はいくらですか？", 
+            "最も利益が出た日はいつですか？",
+            "EPRX1とEPRX3のどちらがより収益に貢献していますか？",
+            "バッテリーの稼働率はどの程度ですか？",
+            "アプリが起動しない場合の対処法を教えてください",
+            "最適化が遅い場合の改善方法を教えてください",
+            "CSVデータの正しい形式を教えてください"
+        ]
+        
+        help_text = """
+🤖 **AIサポートデスクへようこそ！**
+
+以下のような質問ができます：
+
+📊 **データ分析系の質問例**:
+"""
+        
+        for i, question in enumerate(sample_questions[:6], 1):
+            help_text += f"{i}. {question}\n"
+        
+        help_text += """
+🔧 **トラブルシューティング系の質問例**:
+"""
+        
+        for i, question in enumerate(sample_questions[6:], 7):
+            help_text += f"{i}. {question}\n"
+        
+        help_text += """
+
+💡 **Tips**:
+• 最適化を実行後にデータ分析の質問ができます
+• 具体的な数値や期間を含めて質問するとより詳細な回答が得られます
+• トラブルが発生した場合は症状を詳しく説明してください
+
+質問を入力して「送信」ボタンを押してください！
+"""
+        
+        # Display help in chat
+        self.display_chat_message("ヘルプ", help_text, is_user=False)
+        
+        # Also show as dialog for better visibility
+        help_dialog = QDialog(self)
+        help_dialog.setWindowTitle("AIサポートデスク - クイックヘルプ")
+        help_dialog.setModal(True)
+        help_dialog.resize(600, 500)
+        
+        layout = QVBoxLayout(help_dialog)
+        
+        help_display = QTextEdit()
+        help_display.setReadOnly(True)
+        help_display.setPlainText(help_text)
+        help_display.setFont(QFont("システムフォント", 11))
+        layout.addWidget(help_display)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        close_btn = QPushButton("閉じる")
+        close_btn.clicked.connect(help_dialog.accept)
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        
+        help_dialog.exec()
