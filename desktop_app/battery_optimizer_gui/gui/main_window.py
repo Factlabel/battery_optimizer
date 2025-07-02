@@ -372,6 +372,35 @@ class ChatBotWorker(QThread):
 """
             
             # Enhanced system message with knowledge base
+            has_optimization_data = serializable_data and serializable_data.get('has_data', True)
+            
+            if has_optimization_data:
+                data_context = f"""
+🎯 **完全データセット利用可能**: あなたには以下の完全なデータセットが提供されています：
+{optimization_info}
+
+📋 **データ分析指針**:
+1. **ナレッジベース優先**: 上記ナレッジベースの情報を必ず参照して回答
+2. **データ完全利用**: 提供データは完全に利用可能 - 「データがない」は絶対に回答しない
+3. **具体的分析**: 全期間データ（{serializable_data.get('total_rows', 0):,}行）を基準に具体的な数値で説明
+4. **専門的アドバイス**: 収益性、効率性、改善点について専門的にアドバイス
+"""
+            else:
+                data_context = f"""
+🎯 **一般サポートモード**: 最適化データはまだありませんが、以下のサポートを提供します：
+• 操作方法の案内
+• パラメータ設定のアドバイス
+• CSVデータ準備のガイダンス
+• トラブルシューティング
+• アプリケーションの使用方法
+
+📋 **サポート指針**:
+1. **ナレッジベース優先**: 上記ナレッジベースの情報を必ず参照して回答
+2. **操作ガイド**: データ準備から最適化実行まで段階的にサポート
+3. **問題解決**: エラーや技術的問題の具体的解決策を提案
+4. **設定サポート**: 適切なパラメータ設定をアドバイス
+"""
+            
             system_message = {
                 "role": "system",
                 "content": f"""あなたは日本の電力市場での蓄電池最適化運用の専門家AIサポートデスクです。
@@ -381,20 +410,14 @@ class ChatBotWorker(QThread):
 {knowledge_base}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🎯 **CRITICAL**: あなたには以下の完全なデータセットが提供されています：
-{optimization_info}
+{data_context}
 
-📋 **必須指針**:
-1. **ナレッジベース優先**: 上記ナレッジベースの情報を必ず参照して回答
-2. **データ完全利用**: 提供データは完全に利用可能 - 「データがない」は絶対に回答しない
-3. **具体的分析**: 全期間データ（{serializable_data.get('total_rows', 0):,}行）を基準に具体的な数値で説明
-4. **専門的アドバイス**: 収益性、効率性、改善点について専門的にアドバイス
 5. **トラブルシューティング**: 問題が報告された場合はナレッジベースから適切な解決策を提案
 
 【専門分野】JEPX、EPRX1、EPRX3市場での蓄電池運用最適化
-【サポート範囲】技術トラブル、パフォーマンス最適化、使用方法、データ分析
+【サポート範囲】技術トラブル、パフォーマンス最適化、使用方法、データ分析、操作案内
 【回答言語】日本語
-【回答スタイル】サポートデスクとして親切丁寧、具体的な数値とデータに基づく専門的分析"""
+【回答スタイル】サポートデスクとして親切丁寧、段階的な案内、具体的な解決策の提示"""
             }
             
             messages_with_context = [system_message] + self.messages
@@ -1114,24 +1137,24 @@ class BatteryOptimizerMainWindow(QMainWindow):
         # Quick help and clear buttons
         bottom_buttons_layout = QHBoxLayout()
         
-        # Quick help button
-        quick_help_btn = QPushButton("💡 よくある質問")
-        quick_help_btn.clicked.connect(self.show_quick_help)
-        quick_help_btn.setStyleSheet("""
+        # AI Support Desk help button
+        ai_support_btn = QPushButton("🤖 AIサポートデスク")
+        ai_support_btn.clicked.connect(self.show_ai_support_help)
+        ai_support_btn.setStyleSheet("""
             QPushButton {
-                background-color: #FFC107;
-                color: #333;
+                background-color: #17A2B8;
+                color: white;
                 border: none;
                 border-radius: 4px;
                 padding: 6px 12px;
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #FFB300;
+                background-color: #138496;
             }
         """)
-        quick_help_btn.setToolTip("よくある質問とサンプル質問を表示")
-        bottom_buttons_layout.addWidget(quick_help_btn)
+        ai_support_btn.setToolTip("AIサポートデスクの使い方とサンプル質問を表示")
+        bottom_buttons_layout.addWidget(ai_support_btn)
         
         bottom_buttons_layout.addStretch()
         
@@ -2741,8 +2764,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.send_button.setEnabled(False)
         self.send_button.setText("送信中...")
         
-        # Prepare optimization data for context (ALWAYS use full data for AI analysis)
+        # Prepare optimization data for context (use data if available, but allow general support)
         optimization_context = None
+        has_optimization_data = False
+        
         if self.optimization_results:
             # Get ALL results data (not filtered) for comprehensive AI analysis
             all_results = self.optimization_results.get("results", [])
@@ -2756,6 +2781,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 "full_results_sample": all_results[-20:] if all_results else [],  # Last 20 rows for context
                 "data_statistics": self._generate_ai_context_stats(all_results) if all_results else {}
             }
+            has_optimization_data = True
             
             self.add_log_message(f"🤖 AI用データ準備完了: 全{len(all_results)}行のデータを送信")
             self.add_log_message(f"🤖 サマリーキー数: {len(optimization_context['summary'])}個")
@@ -2768,13 +2794,13 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     total_revenue = revenue_stats.get('total_revenue', 0)
                     self.add_log_message(f"🤖 総収益データ: ¥{total_revenue:,.0f}")
         else:
-            self.add_log_message("🤖 最適化結果がないため、AIにデータを送信しません")
-            QMessageBox.warning(self, "データ未準備", "最適化結果がありません。\nまず最適化を実行してからAI分析をご利用ください。")
-            # Re-enable input
-            self.chat_input.setEnabled(True)
-            self.send_button.setEnabled(True)
-            self.send_button.setText("送信")
-            return
+            # No optimization data available, but still allow general support
+            optimization_context = {
+                "has_data": False,
+                "message": "最適化結果はまだありません。操作方法やトラブルシューティングについてお手伝いできます。"
+            }
+            self.add_log_message("🤖 最適化結果はありませんが、一般的なサポートを提供します")
+            has_optimization_data = False
         
         # Start chatbot worker
         self.chatbot_worker = ChatBotWorker(
@@ -3947,8 +3973,8 @@ OS: {self.get_system_info()}
             self.add_log_message(f"終了日選択エラー: {str(e)}")
             QMessageBox.warning(self, "カレンダーエラー", f"終了日の選択中にエラーが発生しました:\n{str(e)}")
     
-    def show_quick_help(self):
-        """Show quick help with sample questions"""
+    def show_ai_support_help(self):
+        """Show AI support desk help with usage guide and sample questions"""
         sample_questions = [
             "最も収益の高い時間帯はいつですか？",
             "今回の最適化結果の総収益を教えてください",
@@ -3965,7 +3991,20 @@ OS: {self.get_system_info()}
         help_text = """
 🤖 **AIサポートデスクへようこそ！**
 
-以下のような質問ができます：
+AIサポートデスクは最適化前でも利用できます。以下のサポートを提供します：
+
+📋 **サポート内容**:
+• 操作方法の案内 - アプリケーションの使い方
+• データ分析 - 最適化結果の詳細解析（最適化後）
+• トラブルシューティング - エラーや問題の解決
+• 設定サポート - パラメータの最適な設定方法
+
+📚 **操作方法に関する質問例**:
+• CSVファイルの準備方法を教えてください
+• パラメータの設定方法は？
+• 日付範囲の選択方法は？
+• 結果をエクスポートする方法は？
+• グラフの見方を教えてください
 
 📊 **データ分析系の質問例**:
 """
@@ -3982,22 +4021,23 @@ OS: {self.get_system_info()}
         
         help_text += """
 
-💡 **Tips**:
-• 最適化を実行後にデータ分析の質問ができます
+💡 **使い方のコツ**:
+• 最適化前でも操作方法やトラブルシューティングの相談ができます
+• 最適化後はデータ分析の詳細な質問ができます
 • 具体的な数値や期間を含めて質問するとより詳細な回答が得られます
-• トラブルが発生した場合は症状を詳しく説明してください
+• エラーが発生した場合は症状や状況を詳しく説明してください
 
 質問を入力して「送信」ボタンを押してください！
 """
         
         # Display help in chat
-        self.display_chat_message("ヘルプ", help_text, is_user=False)
+        self.display_chat_message("AIサポートデスク", help_text, is_user=False)
         
         # Also show as dialog for better visibility
         help_dialog = QDialog(self)
-        help_dialog.setWindowTitle("AIサポートデスク - クイックヘルプ")
+        help_dialog.setWindowTitle("🤖 AIサポートデスク")
         help_dialog.setModal(True)
-        help_dialog.resize(600, 500)
+        help_dialog.resize(650, 550)
         
         layout = QVBoxLayout(help_dialog)
         
