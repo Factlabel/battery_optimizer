@@ -1992,17 +1992,22 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     wedges, texts, autotexts = ax2.pie(
                         market_totals_filtered.values(), 
                         labels=market_totals_filtered.keys(),
-                        autopct=lambda pct: f'{pct:.1f}%\n({int(pct/100 * sum(market_totals_filtered.values())/1000):.0f}K円)' if abs(pct/100 * sum(market_totals_filtered.values())) > 1000 else f'{pct:.1f}%\n({int(pct/100 * sum(market_totals_filtered.values())):,}円)',
+                        autopct=lambda pct: f'{pct:.1f}%\n({int(pct/100 * sum(market_totals_filtered.values())/1000):.0f}K円)' if abs(pct/100 * sum(market_totals_filtered.values())) > 1000 else f'{pct:.1f}%',
                         colors=colors[:len(market_totals_filtered)],
-                        startangle=90
+                        startangle=90,
+                        textprops={'fontsize': 6}  # Set default text size
                     )
                     ax2.set_title('市場別収益貢献', fontsize=12, fontweight='bold')
                     
-                    # Improve text readability
+                    # Improve text readability with smaller font size
                     for autotext in autotexts:
                         autotext.set_color('white')
                         autotext.set_fontweight('bold')
-                        autotext.set_fontsize(8)
+                        autotext.set_fontsize(6)  # Reduced from 8 to 6
+                    
+                    # Also reduce label font size
+                    for text in texts:
+                        text.set_fontsize(7)  # Smaller label font
                 else:
                     ax2.text(0.5, 0.5, 'データなし\n(すべての市場で収益100円未満)', 
                             ha='center', va='center', transform=ax2.transAxes, fontsize=10)
@@ -2032,12 +2037,18 @@ class BatteryOptimizerMainWindow(QMainWindow):
                         labels=action_counts.index,
                         autopct='%1.1f%%',
                         colors=[colors_action.get(action, '#CCCCCC') for action in action_counts.index],
-                        startangle=90
+                        startangle=90,
+                        textprops={'fontsize': 6}  # Set default text size
                     )
                     ax3.set_title('アクション分布', fontsize=12, fontweight='bold')
                     
+                    # Reduce font sizes for better fit
                     for autotext in autotexts:
-                        autotext.set_fontsize(8)
+                        autotext.set_fontsize(6)  # Reduced from 8 to 6
+                    
+                    # Also reduce label font size
+                    for text in texts:
+                        text.set_fontsize(7)  # Smaller label font
                 else:
                     ax3.text(0.5, 0.5, 'アクションデータなし', 
                             ha='center', va='center', transform=ax3.transAxes)
@@ -2070,16 +2081,22 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     daily_pnl_sampled = daily_pnl
                 
                 # Line plot with markers (smaller markers for large datasets)
-                marker_size = 3 if len(daily_pnl_sampled) > 50 else 6
-                ax4.plot(daily_pnl_sampled.index, daily_pnl_sampled.values, 
-                        marker='o', linewidth=1.5, markersize=marker_size, 
-                        color='#007AFF', markerfacecolor='white', markeredgecolor='#007AFF')
+                marker_size = 4 if len(daily_pnl_sampled) > 50 else 8
+                line_width = 2.0 if len(daily_pnl_sampled) <= 50 else 1.5
                 
-                # Fill positive/negative areas
+                # Plot main line with better visibility
+                ax4.plot(daily_pnl_sampled.index, daily_pnl_sampled.values, 
+                        marker='o', linewidth=line_width, markersize=marker_size, 
+                        color='#1f77b4', markerfacecolor='white', markeredgecolor='#1f77b4',
+                        markeredgewidth=1.5, zorder=3)
+                
+                # Fill positive/negative areas with better colors and transparency
                 ax4.fill_between(daily_pnl_sampled.index, daily_pnl_sampled.values, 0, 
-                               where=(daily_pnl_sampled.values > 0), color='green', alpha=0.3, label='利益')
+                               where=(daily_pnl_sampled.values > 0), color='#2ca02c', alpha=0.5, 
+                               label='利益', zorder=1)
                 ax4.fill_between(daily_pnl_sampled.index, daily_pnl_sampled.values, 0,
-                               where=(daily_pnl_sampled.values <= 0), color='red', alpha=0.3, label='損失')
+                               where=(daily_pnl_sampled.values <= 0), color='#d62728', alpha=0.5, 
+                               label='損失', zorder=2)
                 
                 ax4.set_title(f'日別収益推移 ({self.get_date_range_title()})', fontsize=12, fontweight='bold')
                 ax4.set_xlabel('日付')
@@ -2095,7 +2112,17 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     ax4.xaxis.set_major_locator(mdates.WeekdayLocator())
                     ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
                 else:
+                    ax4.xaxis.set_major_locator(mdates.DayLocator())
                     ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+                
+                # Set y-axis range to ensure data visibility
+                y_min, y_max = daily_pnl_sampled.min(), daily_pnl_sampled.max()
+                y_range = max(abs(y_max), abs(y_min))
+                if y_range > 0:
+                    ax4.set_ylim(y_min - y_range * 0.1, y_max + y_range * 0.1)
+                
+                # Add zero line for reference
+                ax4.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=0.8)
                 
                 # Rotate labels for better readability
                 plt.setp(ax4.xaxis.get_majorticklabels(), rotation=45, ha='right')
@@ -2108,15 +2135,14 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 worst_day = daily_pnl.idxmin()
                 worst_day_profit = daily_pnl.min()
                 
-                stats_text = f"""収益サマリー ({self.get_date_range_title()}):
-• 総収益: {total_profit:,.0f}円
-• 平均日収: {avg_daily_profit:,.0f}円
-• 最高収益日: {best_day.strftime('%m/%d')} ({best_day_profit:,.0f}円)
-• 最低収益日: {worst_day.strftime('%m/%d')} ({worst_day_profit:,.0f}円)"""
+                # Create compact stats text for better positioning
+                stats_text = f"""収益サマリー ({self.get_date_range_title()}): 総収益 {total_profit:,.0f}円 | 平均日収 {avg_daily_profit:,.0f}円 | 最高 {best_day.strftime('%m/%d')}({best_day_profit:,.0f}円) | 最低 {worst_day.strftime('%m/%d')}({worst_day_profit:,.0f}円)"""
                 
-                self.revenue_figure.text(0.02, 0.98, stats_text, transform=self.revenue_figure.transFigure,
-                                       fontsize=9, verticalalignment='top', fontweight='bold',
-                                       bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
+                # Position stats box at bottom to avoid overlap with any graphs
+                self.revenue_figure.text(0.5, 0.02, stats_text, transform=self.revenue_figure.transFigure,
+                                       fontsize=8, verticalalignment='bottom', horizontalalignment='center',
+                                       fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', 
+                                       facecolor='lightblue', alpha=0.9))
                 
                 self.add_log_message("✅ グラフ4完了")
                 
@@ -2125,12 +2151,12 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 ax4.text(0.5, 0.5, f'日別推移グラフエラー:\n{str(e)}', 
                         ha='center', va='center', transform=ax4.transAxes)
             
-            # Overall title
+            # Overall title with better positioning
             period_title = f"収益詳細分析 - {self.get_date_range_title()}"
-            self.revenue_figure.suptitle(period_title, fontsize=14, fontweight='bold', y=0.95)
+            self.revenue_figure.suptitle(period_title, fontsize=14, fontweight='bold', y=0.97)
             
-            # Adjust layout to prevent overlapping
-            self.revenue_figure.tight_layout(rect=[0, 0, 1, 0.93])
+            # Adjust layout to prevent overlapping, accounting for bottom stats box
+            self.revenue_figure.tight_layout(rect=[0, 0.08, 1, 0.95])
             
             self.revenue_canvas.draw()
             self.add_log_message("✅ update_revenue_details: グラフ描画完全完了")
