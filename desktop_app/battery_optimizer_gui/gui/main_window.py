@@ -495,6 +495,11 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.date_range_end = None
         self.date_range_mode = "all"  # "all", "range", "last_7", "last_30"
         
+        # AI loading animation variables
+        self.ai_loading_timer = None
+        self.hourglass_icons = ["⏳", "⌛"]
+        self.hourglass_index = 0
+        
         self.init_ui()
         self.load_settings()
         
@@ -1125,9 +1130,14 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 border-radius: 6px;
                 padding: 8px 16px;
                 font-weight: bold;
+                min-width: 80px;
             }
             QPushButton:hover {
                 background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #FFA500;
+                color: white;
             }
         """)
         input_layout.addWidget(self.send_button)
@@ -2663,6 +2673,14 @@ class BatteryOptimizerMainWindow(QMainWindow):
             else:
                 event.ignore()
                 return
+        
+        # Stop AI loading animation if running
+        self.stop_ai_loading_animation()
+        
+        # Cancel any running chatbot worker
+        if self.chatbot_worker and self.chatbot_worker.isRunning():
+            self.chatbot_worker.terminate()
+            self.chatbot_worker.wait()
                 
         # Save settings
         self.save_settings()
@@ -2759,10 +2777,24 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.display_chat_message("ユーザー", message, is_user=True)
         self.chat_input.clear()
         
-        # Disable input while processing
+        # Start loading animation
+        self.start_ai_loading_animation()
+        
+        # Disable input while processing and show loading state
         self.chat_input.setEnabled(False)
         self.send_button.setEnabled(False)
-        self.send_button.setText("送信中...")
+        self.send_button.setText("⏳ AI回答中...")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FFA500;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 100px;
+            }
+        """)
         
         # Prepare optimization data for context (use data if available, but allow general support)
         optimization_context = None
@@ -2814,22 +2846,64 @@ class BatteryOptimizerMainWindow(QMainWindow):
         
     def on_chat_response(self, response):
         """Handle chatbot response"""
+        # Stop loading animation
+        self.stop_ai_loading_animation()
+        
         self.chat_messages.append({"role": "assistant", "content": response})
         self.display_chat_message("AI分析", response, is_user=False)
         
-        # Re-enable input
+        # Re-enable input and restore button style
         self.chat_input.setEnabled(True)
         self.send_button.setEnabled(True)
         self.send_button.setText("送信")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #FFA500;
+                color: white;
+            }
+        """)
         
     def on_chat_error(self, error):
         """Handle chatbot error"""
+        # Stop loading animation
+        self.stop_ai_loading_animation()
+        
         self.display_chat_message("エラー", error, is_user=False, is_error=True)
         
-        # Re-enable input
+        # Re-enable input and restore button style
         self.chat_input.setEnabled(True)
         self.send_button.setEnabled(True)
         self.send_button.setText("送信")
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:disabled {
+                background-color: #FFA500;
+                color: white;
+            }
+        """)
         
     def display_chat_message(self, sender, message, is_user=False, is_error=False):
         """Display chat message in the chat area"""
@@ -2864,6 +2938,64 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.chat_messages.clear()
         self.chat_display.clear()
         self.chat_display.append("<p style='color: gray; text-align: center;'>チャット履歴がクリアされました。</p>")
+        
+    def start_ai_loading_animation(self):
+        """Start AI loading animation in chat"""
+        # Stop any existing animation
+        self.stop_ai_loading_animation()
+        
+        # Show progress bar
+        if hasattr(self, 'ai_loading_widget'):
+            self.ai_loading_widget.setVisible(True)
+        
+        # Add initial loading message
+        self.ai_loading_dots = 0
+        self.ai_loading_message_id = f"loading_msg_{datetime.now().timestamp()}"
+        
+        # Add loading message to chat
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        loading_html = f"""
+        <div style="margin: 10px 0; padding: 10px; border-left: 3px solid #FFA500; background-color: #FFF8DC; border-radius: 8px; opacity: 0.8;">
+            <strong style="color: #FF8C00;">🤖 AI分析</strong> 
+            <span style="color: gray; font-size: 12px;">[{timestamp}]</span><br/>
+            <div style="margin-top: 5px; font-style: italic; color: #666;">
+                🔄 AIが回答を考えています...
+            </div>
+        </div>
+        """
+        
+        self.chat_display.append(loading_html)
+        
+        # Scroll to bottom
+        scrollbar = self.chat_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+        # Start timer for hourglass rotation
+        self.ai_loading_timer = QTimer()
+        self.ai_loading_timer.timeout.connect(self.update_ai_loading_animation)
+        self.ai_loading_timer.start(800)  # Update every 800ms
+        
+    def update_ai_loading_animation(self):
+        """Update the hourglass rotation animation"""
+        # Switch between hourglass icons
+        self.hourglass_index = (self.hourglass_index + 1) % 2
+        current_hourglass = self.hourglass_icons[self.hourglass_index]
+        
+        # Update send button text with rotating hourglass
+        button_text = f"{current_hourglass} AI回答中..."
+        
+        if self.send_button and not self.send_button.isEnabled():
+            self.send_button.setText(button_text)
+        
+    def stop_ai_loading_animation(self):
+        """Stop AI loading animation"""
+        # Stop timer
+        if self.ai_loading_timer:
+            self.ai_loading_timer.stop()
+            self.ai_loading_timer = None
+            
+        # Reset hourglass animation
+        self.hourglass_index = 0
         
     def init_empty_chart(self):
         """Initialize empty chart"""
@@ -4032,29 +4164,3 @@ AIサポートデスクは最適化前でも利用できます。以下のサポ
         
         # Display help in chat
         self.display_chat_message("AIサポートデスク", help_text, is_user=False)
-        
-        # Also show as dialog for better visibility
-        help_dialog = QDialog(self)
-        help_dialog.setWindowTitle("🤖 AIサポートデスク")
-        help_dialog.setModal(True)
-        help_dialog.resize(650, 550)
-        
-        layout = QVBoxLayout(help_dialog)
-        
-        help_display = QTextEdit()
-        help_display.setReadOnly(True)
-        help_display.setPlainText(help_text)
-        help_display.setFont(QFont("システムフォント", 11))
-        layout.addWidget(help_display)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        
-        close_btn = QPushButton("閉じる")
-        close_btn.clicked.connect(help_dialog.accept)
-        button_layout.addStretch()
-        button_layout.addWidget(close_btn)
-        
-        layout.addLayout(button_layout)
-        
-        help_dialog.exec()
