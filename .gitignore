@@ -11,3 +11,11 @@ venv/
 
 # macOS
 .DS_Store
+
+# Logs
+*.log
+app_output.log
+
+# Temporary and test files
+*のコピー*
+test_*.csv
