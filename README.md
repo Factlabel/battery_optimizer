@@ -231,15 +231,6 @@ python run_battery_optimizer.py
 
 詳細は [LICENSE](shared/LICENSE) を参照してください。
 
-## 👥 貢献
-
-プロジェクトへの貢献を歓迎します：
-
-1. Issue報告
-2. 機能要望
-3. Pull Request
-4. ドキュメント改善
-
 ---
 
 **🏢 Factlabel** | © 2024 | Battery Storage Optimization Solutions 
