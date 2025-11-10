@@ -800,7 +800,36 @@ class OptimizationEngine(QThread):
             'EPRX3_PnL': round(slot_eprx3_pnl),
             'Total_Daily_PnL': round(slot_total_pnl)
         }
-    
+
+    def _calculate_months_covered(self, df_results: pd.DataFrame) -> int:
+        """Derive the number of billing months from source data with safe fallbacks."""
+
+        def _normalize(value) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except TypeError:
+                pass
+            try:
+                value_int = int(value)
+            except (TypeError, ValueError):
+                return None
+            if value_int <= 0:
+                return None
+            return value_int
+
+        months = None
+        if self.price_data is not None and 'date' in self.price_data.columns:
+            price_dates = pd.to_datetime(self.price_data['date'], errors='coerce')
+            months = _normalize(price_dates.dt.to_period('M').nunique())
+
+        if months is None:
+            months = _normalize(df_results['date'].dt.to_period('M').nunique())
+
+        return months if months is not None else 1
+
     def _generate_summary(self, results: List[Dict], params: Dict, 
                          wheeling_data: Dict) -> Dict:
         """Generate optimization summary"""
@@ -809,7 +838,10 @@ class OptimizationEngine(QThread):
             return {}
         
         df_results = pd.DataFrame(results)
-        
+        df_results['date'] = pd.to_datetime(df_results['date'], errors='coerce')
+
+        months_covered = self._calculate_months_covered(df_results)
+
         # Calculate totals
         total_charge_kWh = df_results['charge_kWh'].sum()
         total_discharge_kWh = df_results['discharge_kWh'].sum()
@@ -822,14 +854,16 @@ class OptimizationEngine(QThread):
         
         # Calculate monthly fees
         battery_power_kW = params['battery_power_kW']
-        wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0) * battery_power_kW
+        battery_loss_rate = params.get('battery_loss_rate', 0)
+        wheeling_base_rate = wheeling_data.get("wheeling_base_charge", 0)
+        wheeling_base_charge = wheeling_base_rate * battery_power_kW * months_covered * battery_loss_rate
         wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0) * total_loss_kWh
         
         # Use modified renewable energy surcharge if available
         if hasattr(self.parent(), 'get_current_surcharge'):
-            renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss_kWh
+            renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss_kWh * battery_loss_rate
         else:
-            renewable_energy_surcharge = 3.49 * total_loss_kWh  # Fixed rate
+            renewable_energy_surcharge = 3.49 * total_loss_kWh * battery_loss_rate  # Fixed rate
         
         final_profit = total_daily_pnl - wheeling_base_charge - wheeling_usage_fee - renewable_energy_surcharge
         
@@ -865,6 +899,7 @@ class OptimizationEngine(QThread):
         summary_list = []
 
         battery_power_kW = params['battery_power_kW']
+        battery_loss_rate = params.get('battery_loss_rate', 0)
         target_area_name = params['target_area_name']
         voltage_type = params['voltage_type']
         
@@ -879,13 +914,13 @@ class OptimizationEngine(QThread):
 
             wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
             wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
-            monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
+            monthly_wheeling_fee = (wheeling_base_charge * battery_power_kW * battery_loss_rate) + (wheeling_usage_fee * total_loss)
             
             # Use modified renewable energy surcharge if available
             if hasattr(self.parent(), 'get_current_surcharge'):
-                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss
+                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss * battery_loss_rate
             else:
-                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
+                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss * battery_loss_rate
             
             action_counts = group["action"].value_counts().to_dict()
             action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())

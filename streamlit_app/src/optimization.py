@@ -360,7 +360,15 @@ def run_optimization(
             total_loss_kWh += r["loss_kWh"]
 
     usage_fee_kWh = max(0, total_charge_kWh - total_discharge_kWh)
-    monthly_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss_kWh
+    months_covered = pd.to_datetime(df_all['date'], errors='coerce').dt.to_period('M').nunique()
+    if not months_covered:
+        months_covered = 1
+
+    monthly_fee = (
+        wheeling_base_charge * battery_power_kW * months_covered * battery_loss_rate
+        + wheeling_usage_fee * total_loss_kWh
+        + RENEWABLE_ENERGY_SURCHARGE * total_loss_kWh * battery_loss_rate
+    )
     final_profit = total_profit - monthly_fee
 
     return all_transactions, round(total_profit), round(final_profit)
@@ -397,8 +405,11 @@ def generate_monthly_summary(
         wh = WHEELING_DATA["areas"].get(target_area_name, {}).get(voltage_type, {})
         wheeling_base_charge = wh.get("wheeling_base_charge", 0.0)
         wheeling_usage_fee = wh.get("wheeling_usage_fee", 0.0)
-        monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
-        monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
+        monthly_wheeling_fee = (
+            wheeling_base_charge * battery_power_kW * battery_loss_rate
+            + wheeling_usage_fee * total_loss
+        )
+        monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss * battery_loss_rate
 
         action_counts = group["action"].value_counts().to_dict()
         action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())

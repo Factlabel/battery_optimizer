@@ -3052,10 +3052,15 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 continue
                 
             if isinstance(value, (int, float)):
-                if 'Profit' in key or 'Fee' in key or 'Charge' in key:
-                    summary_text += f"{key}: ¥{value:,.0f}\n"
-                elif 'kWh' in key:
+                key_lower = key.lower()
+                if 'kwh' in key_lower:
                     summary_text += f"{key}: {value:,.1f} kWh\n"
+                elif 'kw' in key_lower:
+                    summary_text += f"{key}: {value:,.1f} kW\n"
+                elif any(term in key_lower for term in ['profit', 'fee', 'surcharge', 'pnl', 'revenue', 'cost']):
+                    summary_text += f"{key}: ¥{value:,.0f}\n"
+                elif any(term in key_lower for term in ['count', 'slots']):
+                    summary_text += f"{key}: {int(round(value)):,}\n"
                 else:
                     summary_text += f"{key}: {value:,.2f}\n"
             else:

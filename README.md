@@ -107,6 +107,7 @@ python run_battery_optimizer.py
 - 日付形式対応: `2023/4/1`形式の単桁月日に対応
 - pandas自動検出: より柔軟で確実な日付変換
 - 変数未定義エラー修正: `final_rows`, `data_retention_rate`の適切な計算
+- 2025-11-10: V2（EPRX3確率版）で託送基本料金が固定値 500円/kW になる事象を解消し、エリア別設定とUI上の補正値を正しく参照
 
 #### AI機能統合
 - OpenAI GPT-4o: 最適化結果の詳細分析とレポート生成

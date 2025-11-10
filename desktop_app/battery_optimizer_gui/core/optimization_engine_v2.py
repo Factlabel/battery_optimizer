@@ -254,27 +254,27 @@ class OptimizationEngineV2(QThread):
         self.log_updated.emit("✅ データ検証完了")
     
     def _get_wheeling_data(self, area_name: str, voltage_type: str) -> Dict:
-        """Get wheeling fee data for the specified area and voltage"""
-        try:
-            from config.area_config import get_area_wheeling_data
-            wheeling_data = get_area_wheeling_data(area_name, voltage_type)
-            self.log_updated.emit(f"📍 託送データ取得: {area_name}, {voltage_type}")
-            return wheeling_data
-        except ImportError:
-            # Fallback values if config is not available
-            self.log_updated.emit("⚠️ 託送データ設定が見つかりません。デフォルト値を使用します")
-            return {
-                "wheeling_base_charge": 500.0,
-                "wheeling_usage_fee": 1.86,
-                "loss_rate": 0.03
-            }
-        except Exception as e:
-            self.log_updated.emit(f"⚠️ 託送データ取得エラー: {str(e)}。デフォルト値を使用します")
-            return {
-                "wheeling_base_charge": 500.0,
-                "wheeling_usage_fee": 1.86,
-                "loss_rate": 0.03
-            }
+        """Get wheeling data for the specified area and voltage type"""
+        if hasattr(self.parent(), 'get_current_wheeling_data'):
+            wheeling_data_source = self.parent().get_current_wheeling_data()
+            wheeling_data = wheeling_data_source["areas"].get(area_name, {}).get(voltage_type, {})
+            self.log_updated.emit(f"📊 使用データ: UI修正データ ({area_name} {voltage_type})")
+        else:
+            from config.area_config import WHEELING_DATA
+            wheeling_data = WHEELING_DATA["areas"].get(area_name, {}).get(voltage_type, {})
+            self.log_updated.emit(f"📊 使用データ: 設定ファイル ({area_name} {voltage_type})")
+
+        if not wheeling_data:
+            raise ValueError(f"エリア '{area_name}' の電圧区分 '{voltage_type}' のデータが見つかりません")
+
+        loss_rate = wheeling_data.get("loss_rate", 0.0)
+        base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
+        usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
+        self.log_updated.emit(
+            f"📊 {area_name} {voltage_type}: 損失率{loss_rate*100:.2f}%, 基本{base_charge:.2f}円/kW, 使用料{usage_fee:.2f}円/kWh"
+        )
+
+        return wheeling_data
     
     def _run_battery_optimization(self, params: Dict, df_all: pd.DataFrame, 
                                 wheeling_data: Dict) -> List[Dict]:
@@ -762,7 +762,36 @@ class OptimizationEngineV2(QThread):
             'EPRX3_PnL': round(slot_eprx3_pnl),
             'Total_Daily_PnL': round(slot_total_pnl)
         }
-    
+
+    def _calculate_months_covered(self, df_results: pd.DataFrame) -> int:
+        """Derive the number of billing months from source data with safe fallbacks."""
+
+        def _normalize(value) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                if pd.isna(value):
+                    return None
+            except TypeError:
+                pass
+            try:
+                value_int = int(value)
+            except (TypeError, ValueError):
+                return None
+            if value_int <= 0:
+                return None
+            return value_int
+
+        months = None
+        if self.price_data is not None and 'date' in self.price_data.columns:
+            price_dates = pd.to_datetime(self.price_data['date'], errors='coerce')
+            months = _normalize(price_dates.dt.to_period('M').nunique())
+
+        if months is None:
+            months = _normalize(df_results['date'].dt.to_period('M').nunique())
+
+        return months if months is not None else 1
+
     def _generate_summary(self, results: List[Dict], params: Dict, 
                          wheeling_data: Dict) -> Dict:
         """Generate optimization summary"""
@@ -771,7 +800,10 @@ class OptimizationEngineV2(QThread):
             return {}
         
         df_results = pd.DataFrame(results)
+        df_results['date'] = pd.to_datetime(df_results['date'], errors='coerce')
         
+        months_covered = self._calculate_months_covered(df_results)
+
         # Calculate totals
         total_charge_kWh = df_results['charge_kWh'].sum()
         total_discharge_kWh = df_results['discharge_kWh'].sum()
@@ -783,14 +815,16 @@ class OptimizationEngineV2(QThread):
         
         # Calculate monthly fees
         battery_power_kW = params['battery_power_kW']
-        wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0) * battery_power_kW
+        battery_loss_rate = params.get('battery_loss_rate', 0)
+        wheeling_base_rate = wheeling_data.get("wheeling_base_charge", 0)
+        wheeling_base_charge = wheeling_base_rate * battery_power_kW * months_covered * battery_loss_rate
         wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0) * total_loss_kWh
         
         # Use modified renewable energy surcharge if available
         if hasattr(self.parent(), 'get_current_surcharge'):
-            renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss_kWh
+            renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss_kWh * battery_loss_rate
         else:
-            renewable_energy_surcharge = 3.49 * total_loss_kWh  # Fixed rate
+            renewable_energy_surcharge = 3.49 * total_loss_kWh * battery_loss_rate  # Fixed rate
         
         final_profit = total_daily_pnl - wheeling_base_charge - wheeling_usage_fee - renewable_energy_surcharge
         
@@ -839,6 +873,7 @@ class OptimizationEngineV2(QThread):
         summary_list = []
 
         battery_power_kW = params['battery_power_kW']
+        battery_loss_rate = params.get('battery_loss_rate', 0)
         target_area_name = params['target_area_name']
         voltage_type = params['voltage_type']
         eprx3_activation_rate = params.get('eprx3_activation_rate', 100.0)
@@ -855,13 +890,13 @@ class OptimizationEngineV2(QThread):
 
             wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
             wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
-            monthly_wheeling_fee = wheeling_base_charge * battery_power_kW + wheeling_usage_fee * total_loss
+            monthly_wheeling_fee = (wheeling_base_charge * battery_power_kW * battery_loss_rate) + (wheeling_usage_fee * total_loss)
             
             # Use modified renewable energy surcharge if available
             if hasattr(self.parent(), 'get_current_surcharge'):
-                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss
+                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss * battery_loss_rate
             else:
-                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
+                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss * battery_loss_rate
             
             action_counts = group["action"].value_counts().to_dict()
             action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
