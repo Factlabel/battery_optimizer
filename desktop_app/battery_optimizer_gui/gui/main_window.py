@@ -2086,7 +2086,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.populate_results_table(self.optimization_results['results'])
             self.add_log_message("update_results_display: テーブル更新完了")
             
-            self.populate_summary_display(self.optimization_results['summary'])
+            self.populate_summary_display(
+                self.optimization_results['summary'],
+                self.optimization_results.get('monthly_summary')
+            )
             self.add_log_message("update_results_display: サマリー更新完了")
             
             self.update_visualization()
@@ -3024,7 +3027,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 self.results_table.setItem(i, j, item)
                 
-    def populate_summary_display(self, summary_data):
+    def populate_summary_display(self, summary_data, monthly_summary=None):
         """Populate the summary display"""
         if not summary_data:
             return
@@ -3065,7 +3068,92 @@ class BatteryOptimizerMainWindow(QMainWindow):
                     summary_text += f"{key}: {value:,.2f}\n"
             else:
                 summary_text += f"{key}: {value}\n"
-                
+
+        monthly_df = pd.DataFrame()
+        if monthly_summary is not None:
+            try:
+                if isinstance(monthly_summary, pd.DataFrame):
+                    monthly_df = monthly_summary.copy()
+                else:
+                    monthly_df = pd.DataFrame(monthly_summary)
+            except Exception as e:
+                self.add_log_message(f"月次サマリーの変換に失敗しました: {e}")
+                monthly_df = pd.DataFrame()
+
+        if not monthly_df.empty:
+            if 'Month' in monthly_df.columns:
+                monthly_df = monthly_df.sort_values('Month')
+
+            summary_text += "\n=== 月次サマリー ===\n"
+
+            metric_definitions = [
+                ("Total_Monthly_PnL", "総収益 (PnL)", "yen"),
+                ("Monthly_Wheeling_Fee", "託送料金", "yen"),
+                ("Monthly_Renewable_Energy_Surcharge", "再エネ賦課金", "yen"),
+                ("Monthly_Net_Profit", "月次純利益", "yen"),
+                ("Total_JEPX_PnL", "JEPX収益", "yen"),
+                ("Total_EPRX1_PnL", "EPRX1収益", "yen"),
+                ("Total_EPRX3_PnL", "EPRX3収益", "yen"),
+                ("Total_Charge_kWh", "充電量", "kWh"),
+                ("Total_Discharge_kWh", "放電量", "kWh"),
+                ("Total_Loss_kWh", "損失量", "kWh"),
+                ("Total_EPRX3_kWh", "EPRX3量", "kWh"),
+                ("EPRX3_Activation_Count", "EPRX3回数", "count"),
+            ]
+
+            price_metric_definitions = [
+                ("Average_Charge_Price", "平均充電価格", "yen_per_kwh"),
+                ("Average_Discharge_Price", "平均放電価格", "yen_per_kwh"),
+                ("Average_EPRX1_Price", "平均EPRX1価格", "yen"),
+                ("Average_EPRX3_Price", "平均EPRX3価格", "yen"),
+            ]
+
+            for _, row in monthly_df.iterrows():
+                row_data = row.to_dict()
+                month_label = row_data.get("Month", "不明")
+                if pd.isna(month_label) or month_label == "":
+                    month_label = "不明"
+
+                summary_text += f"\n■ {month_label}\n"
+
+                for key, label, unit in metric_definitions:
+                    value = row_data.get(key)
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        continue
+
+                    if unit == "yen":
+                        summary_text += f"  • {label}: ¥{float(value):,.0f}\n"
+                    elif unit == "kWh":
+                        summary_text += f"  • {label}: {float(value):,.0f} kWh\n"
+                    elif unit == "count":
+                        summary_text += f"  • {label}: {int(float(value)):,}回\n"
+                    else:
+                        summary_text += f"  • {label}: {value}\n"
+
+                for key, label, unit in price_metric_definitions:
+                    value = row_data.get(key)
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        continue
+
+                    if unit == "yen_per_kwh":
+                        summary_text += f"  • {label}: ¥{float(value):,.2f}/kWh\n"
+                    elif unit == "yen":
+                        summary_text += f"  • {label}: ¥{float(value):,.2f}\n"
+                    else:
+                        summary_text += f"  • {label}: {value}\n"
+
+                action_counts = row_data.get("Action_Counts")
+                if action_counts and isinstance(action_counts, str):
+                    summary_text += f"  • アクション内訳: {action_counts}\n"
+
+                eprx3_rate = row_data.get("EPRX3_Activation_Rate")
+                if eprx3_rate:
+                    summary_text += f"  • EPRX3発動率: {eprx3_rate}\n"
+
+                v1_ratio = row_data.get("V1_Price_Ratio")
+                if v1_ratio:
+                    summary_text += f"  • V1価格比率: {v1_ratio}\n"
+
         self.summary_text.setText(summary_text) 
     
     def _generate_ai_context_stats(self, results_data):
