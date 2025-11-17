@@ -99,7 +99,7 @@ python run_battery_optimizer.py
 
 - **[ユーザーマニュアル](docs/user_manual.md)**: 詳細な使用方法
 - **[ハンズオンガイド](docs/hands_on_guide.md)**: ステップバイステップガイド
-- **[計算仕様書](../shared/calculation_overview.md)**: アルゴリズム詳細
+- **[計算仕様書](../docs/calculation_overview.md)**: アルゴリズム詳細
 
 ## サポート
 

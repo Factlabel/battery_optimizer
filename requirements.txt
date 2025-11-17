@@ -1,5 +1,3 @@
-streamlit~=1.42.2
-pandas~=2.2.3
-numpy~=2.2.3
-PuLP~=3.0.2
-matplotlib~=3.10.0
+# Project-wide dependencies
+-r streamlit_app/requirements.txt
+-r desktop_app/battery_optimizer_gui/requirements.txt

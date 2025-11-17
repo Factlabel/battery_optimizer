@@ -326,8 +326,8 @@ AIがナレッジベースを参照して、一般的な問題の解決策を自
 
 ### 📚 追加リソース
 - **ナレッジベース**: `AI_SUPPORT_KNOWLEDGE_BASE.md`
-- **技術仕様**: `shared/README.md`
-- **計算詳細**: `shared/calculation_overview.md`
+- **技術仕様**: `docs/README.md`
+- **計算詳細**: `docs/calculation_overview.md`
 
 ---
 

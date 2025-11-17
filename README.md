@@ -34,7 +34,7 @@ battery_optimizer_pilot/
 ├── desktop_app/
 │   └── battery_optimizer_gui/    # V2 Desktop Edition
 ├── streamlit_app/                # V1 Web Edition
-└── shared/                       # 共通ドキュメント（計算仕様など）
+└── docs/                         # 共通ドキュメント（計算仕様など）
 ```
 
 ## 機能概要
@@ -64,7 +64,7 @@ battery_optimizer_pilot/
 - `desktop_app/battery_optimizer_gui/README.md` : デスクトップ版の概要とセットアップ
 - `desktop_app/battery_optimizer_gui/README_LAUNCH.md` : 起動および運用ガイド
 - `desktop_app/battery_optimizer_gui/USER_MANUAL.md` : 操作マニュアル
-- `shared/calculation_overview.md` : 最適化アルゴリズムの仕様
+- `docs/calculation_overview.md` : 最適化アルゴリズムの仕様
 - `streamlit_app/docs/user_manual.md` : Web 版の利用ガイド
 
 ## システム要件
@@ -96,4 +96,4 @@ battery_optimizer_pilot/
 
 ## ライセンス
 
-ライセンス情報は `shared/LICENSE` を参照してください。
+ライセンス情報はリポジトリ直下の `LICENSE` を参照してください。

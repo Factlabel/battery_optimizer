@@ -1,4 +1,4 @@
-# Python
+# Python bytecode and notebooks
 __pycache__/
 *.py[cod]
 *.pyo
@@ -6,16 +6,17 @@ __pycache__/
 
 # Virtual environments
 venv/
+**/venv/
 .venv/
 .env/
 
-# macOS
+# Operating system files
 .DS_Store
 
-# Logs
+# Log output
 *.log
 app_output.log
 
-# Temporary and test files
+# Temporary assets and sample exports
 *のコピー*
 test_*.csv
