@@ -52,7 +52,24 @@ Required columns: `date`, `slot`, `JEPX_prediction`, `JEPX_actual`, `EPRX1_predi
 - **6 Tabs**: Graphs, Revenue Details, Data, Summary, AI Chat, Wheeling Fees
 - **AI Integration**: GPT-4o analysis and reporting
 - **Date Filtering**: Period selection for focused analysis
-- **Export Options**: CSV results and graph exports
+- **Export Options**: CSV results, Excelレイアウト準拠のサマリーCSV、グラフ出力
+
+## サマリー出力（Excel互換フォーマット）
+
+- `Summary` タブは Excel テンプレート（PnL_sample.xlsx）と同じ 23 行 × 17 列構成  
+  - 2〜7 行目: パラメータ説明（九州 / 高圧 / 2000 kW / 7200 kWh / 初期SOC 0kWh / 損失率10% を初期値として表示）  
+  - 9 行目: ヘッダー（A列は日付、B〜O列が集計値、P/Q列は空欄）  
+  - 10〜21 行目: 月次明細（1行 = 1ヶ月、A列=月初日、B列=月次純利益、C〜O列=物量・金額・費用）  
+  - 23 行目: 合計/平均 (`SUM`, `AVERAGE`)  
+  - 1, 8, 22 行目は空行
+- 数式ルール  
+  - `B_r = J_r - M_r - N_r - O_r`  
+  - `E_r = C_r * 0.1`（ロス率は実行時パラメータから計算式に反映）  
+  - `H_r = C_r * F_r` / `I_r = D_r * G_r`
+- 画面と CSV エクスポートの双方で同一セル配置・表示  
+  - CSV はセル内に Excel 互換の数式を保持（例: `=C10*F10`）  
+  - 数値フォーマット : 金額・数量は `#,##0` 表示、単価は `#,##0.00`
+- 再エネ賦課金は損失量 (`loss_kWh`) に対し所定単価を乗じて算定（損失率の二重掛け無し）
 
 ## Troubleshooting
 

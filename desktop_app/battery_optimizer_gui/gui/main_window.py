@@ -7,6 +7,7 @@ user interface for the battery optimization application.
 
 import sys
 import os
+import csv
 from pathlib import Path
 import pandas as pd
 from typing import Optional, Dict, Any
@@ -21,7 +22,8 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSplitter, QFrame, QGroupBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QScrollArea,
     QStatusBar, QDateEdit, QButtonGroup, QRadioButton, QPlainTextEdit,
-    QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QCalendarWidget
+    QCheckBox, QDialog, QFormLayout, QDialogButtonBox, QCalendarWidget,
+    QHeaderView, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QSettings, QTimer, pyqtSlot, QDate, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QAction, QIcon
@@ -489,6 +491,8 @@ class BatteryOptimizerMainWindow(QMainWindow):
         self.chat_messages = []
         self.chatbot_worker = None
         self.email_manager = EmailManager(self.settings)
+        self.summary_table = None
+        self.summary_sheet_rows = []
         
         # Date range selection variables
         self.date_range_start = None
@@ -1322,15 +1326,38 @@ class BatteryOptimizerMainWindow(QMainWindow):
         return widget
         
     def create_summary_tab(self):
-        """Create summary tab"""
+        """Create summary tab in spreadsheet-style layout"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Summary display
-        self.summary_text = QTextEdit()
-        self.summary_text.setReadOnly(True)
-        self.summary_text.setFont(QFont("Monaco", 12))
-        layout.addWidget(self.summary_text)
+        column_headers = [chr(ord('A') + i) for i in range(17)]  # A-Q
+        row_headers = [str(i) for i in range(1, 24)]  # 1-23
+        
+        self.summary_table = QTableWidget(len(row_headers), len(column_headers))
+        self.summary_table.setHorizontalHeaderLabels(column_headers)
+        self.summary_table.setVerticalHeaderLabels(row_headers)
+        self.summary_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.summary_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.summary_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.summary_table.setAlternatingRowColors(True)
+        
+        horizontal_header = self.summary_table.horizontalHeader()
+        vertical_header = self.summary_table.verticalHeader()
+        horizontal_header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        vertical_header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        
+        layout.addWidget(self.summary_table)
+        
+        controls_layout = QHBoxLayout()
+        controls_layout.addStretch()
+        
+        export_button = QPushButton("サマリーCSVエクスポート")
+        export_button.clicked.connect(self.export_summary_csv)
+        controls_layout.addWidget(export_button)
+        
+        layout.addLayout(controls_layout)
+        
+        self.reset_summary_table()
         
         return widget
         
@@ -2054,6 +2081,7 @@ class BatteryOptimizerMainWindow(QMainWindow):
         
         # Clear any partial results
         self.optimization_results = None
+        self.reset_summary_table()
         
         # Reset all displays to empty state
         self.init_empty_chart()
@@ -2086,9 +2114,10 @@ class BatteryOptimizerMainWindow(QMainWindow):
             self.populate_results_table(self.optimization_results['results'])
             self.add_log_message("update_results_display: テーブル更新完了")
             
-            self.populate_summary_display(
-                self.optimization_results['summary'],
-                self.optimization_results.get('monthly_summary')
+            self.populate_summary_table(
+                self.optimization_results.get('summary'),
+                self.optimization_results.get('monthly_summary'),
+                self.optimization_results.get('params')
             )
             self.add_log_message("update_results_display: サマリー更新完了")
             
@@ -2595,6 +2624,37 @@ class BatteryOptimizerMainWindow(QMainWindow):
     def export_results(self):
         """Export results table"""
         self.save_results()  # Same as save results for now
+    
+    @pyqtSlot()
+    def export_summary_csv(self):
+        """Export summary sheet in spreadsheet layout as CSV"""
+        if not self.summary_sheet_rows:
+            QMessageBox.warning(self, "エラー", "エクスポート可能なサマリーデータがありません。")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "サマリーCSVを保存",
+            "summary_output.csv",
+            "CSV Files (*.csv)"
+        )
+        
+        if not file_path:
+            return
+        
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+        
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerows(self.summary_sheet_rows)
+            
+            QMessageBox.information(self, "保存完了", f"サマリーを保存しました:\n{file_path}")
+            self.add_log_message(f"サマリーCSVをエクスポート: {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "保存エラー", f"サマリーの保存に失敗しました:\n{e}")
+            self.add_log_message(f"サマリーCSV保存エラー: {e}")
         
     @pyqtSlot()
     def reset_parameters(self):
@@ -3027,48 +3087,120 @@ class BatteryOptimizerMainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 self.results_table.setItem(i, j, item)
                 
-    def populate_summary_display(self, summary_data, monthly_summary=None):
-        """Populate the summary display"""
-        if not summary_data:
+    def reset_summary_table(self):
+        """Clear the summary table and cached rows"""
+        if not self.summary_table:
             return
-            
-        summary_text = "=== 最適化結果サマリー ===\n\n"
         
-        # Add V2 specific information first if available
-        if 'EPRX3_Activation_Rate' in summary_data or 'V1_Price_Ratio' in summary_data:
-            summary_text += "=== V2エンジン設定 ===\n"
-            if 'Initial_SOC_kWh' in summary_data:
-                summary_text += f"初期蓄電量: {summary_data['Initial_SOC_kWh']:.1f} kWh\n"
-            if 'EPRX3_Activation_Rate' in summary_data:
-                summary_text += f"EPRX3発動率: {summary_data['EPRX3_Activation_Rate']:.1f}%\n"
-            if 'V1_Price_Ratio' in summary_data:
-                summary_text += f"V1価格比率: {summary_data['V1_Price_Ratio']:.1f}%\n"
-            if 'EPRX3_Planned_Count' in summary_data:
-                summary_text += f"EPRX3実行回数: {summary_data['EPRX3_Planned_Count']}回\n"
-            summary_text += "\n"
-        
-        summary_text += "=== 財務結果 ===\n"
-        
-        for key, value in summary_data.items():
-            # Skip V2 specific fields as they're already shown
-            if key in ['EPRX3_Activation_Rate', 'V1_Price_Ratio', 'EPRX3_Planned_Count', 'Initial_SOC_kWh']:
-                continue
-                
-            if isinstance(value, (int, float)):
-                key_lower = key.lower()
-                if 'kwh' in key_lower:
-                    summary_text += f"{key}: {value:,.1f} kWh\n"
-                elif 'kw' in key_lower:
-                    summary_text += f"{key}: {value:,.1f} kW\n"
-                elif any(term in key_lower for term in ['profit', 'fee', 'surcharge', 'pnl', 'revenue', 'cost']):
-                    summary_text += f"{key}: ¥{value:,.0f}\n"
-                elif any(term in key_lower for term in ['count', 'slots']):
-                    summary_text += f"{key}: {int(round(value)):,}\n"
+        self.summary_sheet_rows = []
+        for row in range(self.summary_table.rowCount()):
+            for col in range(self.summary_table.columnCount()):
+                item = self.summary_table.item(row, col)
+                if item is None:
+                    item = QTableWidgetItem("")
+                    self.summary_table.setItem(row, col, item)
                 else:
-                    summary_text += f"{key}: {value:,.2f}\n"
-            else:
-                summary_text += f"{key}: {value}\n"
-
+                    item.setText("")
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    
+    def populate_summary_table(self, summary_data, monthly_summary=None, params=None):
+        """Populate summary table to match Excel layout"""
+        if not self.summary_table:
+            return
+        
+        csv_rows, display_rows = self._build_summary_sheet_rows(summary_data, monthly_summary, params)
+        self.summary_sheet_rows = csv_rows
+        
+        self.summary_table.blockSignals(True)
+        try:
+            for row_idx, row_values in enumerate(display_rows):
+                for col_idx, cell_value in enumerate(row_values):
+                    item = self.summary_table.item(row_idx, col_idx)
+                    if item is None:
+                        item = QTableWidgetItem("")
+                        self.summary_table.setItem(row_idx, col_idx, item)
+                    
+                    text = "" if cell_value is None else str(cell_value)
+                    item.setText(text)
+                    
+                    alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                    if row_idx == 8:
+                        alignment = Qt.AlignmentFlag.AlignCenter
+                    elif 9 <= row_idx <= 20:
+                        if col_idx == 0:
+                            alignment = Qt.AlignmentFlag.AlignCenter
+                        elif 1 <= col_idx <= 14:
+                            alignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    elif row_idx == 22 and 1 <= col_idx <= 14:
+                        alignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    
+                    item.setTextAlignment(alignment)
+        finally:
+            self.summary_table.blockSignals(False)
+    
+    def _build_summary_sheet_rows(self, summary_data, monthly_summary, params):
+        """Build CSV and display rows for the summary sheet layout"""
+        column_count = 17  # A-Q
+        max_month_rows = 12  # Rows 10-21
+        csv_rows = []
+        display_rows = []
+        
+        def make_blank_row():
+            return ["" for _ in range(column_count)]
+        
+        def format_loss_rate(value):
+            if value is None:
+                return "0.1"
+            return f"{value:.4f}".rstrip("0").rstrip(".")
+        
+        params = params or {}
+        loss_rate = params.get('battery_loss_rate', 0.1)
+        loss_rate_formula = format_loss_rate(loss_rate if loss_rate > 0 else 0.1)
+        try:
+            loss_rate_value = float(loss_rate_formula)
+        except ValueError:
+            loss_rate_value = 0.0
+        
+        # Row 1: blank
+        blank = make_blank_row()
+        csv_rows.append(blank.copy())
+        display_rows.append(blank.copy())
+        
+        # Rows 2-7: parameter texts
+        for text in self._get_summary_param_texts(params):
+            row = make_blank_row()
+            row[0] = text
+            csv_rows.append(row.copy())
+            display_rows.append(row.copy())
+        
+        # Row 8: blank
+        blank = make_blank_row()
+        csv_rows.append(blank.copy())
+        display_rows.append(blank.copy())
+        
+        # Row 9: header
+        header = [
+            "",
+            "月次純利益",
+            "充電量",
+            "放電量",
+            "内部ロス量",
+            "充電平均価格",
+            "放電平均価格",
+            "買い代金",
+            "売り代金",
+            "JEPX収益",
+            "EPRX1収益",
+            "EPRX3収益",
+            "託送基本料金",
+            "託送従量料金",
+            "再エネ賦課金",
+            "",
+            ""
+        ]
+        csv_rows.append(header.copy())
+        display_rows.append(header.copy())
+        
         monthly_df = pd.DataFrame()
         if monthly_summary is not None:
             try:
@@ -3079,82 +3211,283 @@ class BatteryOptimizerMainWindow(QMainWindow):
             except Exception as e:
                 self.add_log_message(f"月次サマリーの変換に失敗しました: {e}")
                 monthly_df = pd.DataFrame()
-
-        if not monthly_df.empty:
-            if 'Month' in monthly_df.columns:
-                monthly_df = monthly_df.sort_values('Month')
-
-            summary_text += "\n=== 月次サマリー ===\n"
-
-            metric_definitions = [
-                ("Total_Monthly_PnL", "総収益 (PnL)", "yen"),
-                ("Monthly_Wheeling_Fee", "託送料金", "yen"),
-                ("Monthly_Renewable_Energy_Surcharge", "再エネ賦課金", "yen"),
-                ("Monthly_Net_Profit", "月次純利益", "yen"),
-                ("Total_JEPX_PnL", "JEPX収益", "yen"),
-                ("Total_EPRX1_PnL", "EPRX1収益", "yen"),
-                ("Total_EPRX3_PnL", "EPRX3収益", "yen"),
-                ("Total_Charge_kWh", "充電量", "kWh"),
-                ("Total_Discharge_kWh", "放電量", "kWh"),
-                ("Total_Loss_kWh", "損失量", "kWh"),
-                ("Total_EPRX3_kWh", "EPRX3量", "kWh"),
-                ("EPRX3_Activation_Count", "EPRX3回数", "count"),
-            ]
-
-            price_metric_definitions = [
-                ("Average_Charge_Price", "平均充電価格", "yen_per_kwh"),
-                ("Average_Discharge_Price", "平均放電価格", "yen_per_kwh"),
-                ("Average_EPRX1_Price", "平均EPRX1価格", "yen"),
-                ("Average_EPRX3_Price", "平均EPRX3価格", "yen"),
-            ]
-
-            for _, row in monthly_df.iterrows():
-                row_data = row.to_dict()
-                month_label = row_data.get("Month", "不明")
-                if pd.isna(month_label) or month_label == "":
-                    month_label = "不明"
-
-                summary_text += f"\n■ {month_label}\n"
-
-                for key, label, unit in metric_definitions:
-                    value = row_data.get(key)
-                    if value is None or (isinstance(value, float) and pd.isna(value)):
-                        continue
-
-                    if unit == "yen":
-                        summary_text += f"  • {label}: ¥{float(value):,.0f}\n"
-                    elif unit == "kWh":
-                        summary_text += f"  • {label}: {float(value):,.0f} kWh\n"
-                    elif unit == "count":
-                        summary_text += f"  • {label}: {int(float(value)):,}回\n"
-                    else:
-                        summary_text += f"  • {label}: {value}\n"
-
-                for key, label, unit in price_metric_definitions:
-                    value = row_data.get(key)
-                    if value is None or (isinstance(value, float) and pd.isna(value)):
-                        continue
-
-                    if unit == "yen_per_kwh":
-                        summary_text += f"  • {label}: ¥{float(value):,.2f}/kWh\n"
-                    elif unit == "yen":
-                        summary_text += f"  • {label}: ¥{float(value):,.2f}\n"
-                    else:
-                        summary_text += f"  • {label}: {value}\n"
-
-                action_counts = row_data.get("Action_Counts")
-                if action_counts and isinstance(action_counts, str):
-                    summary_text += f"  • アクション内訳: {action_counts}\n"
-
-                eprx3_rate = row_data.get("EPRX3_Activation_Rate")
-                if eprx3_rate:
-                    summary_text += f"  • EPRX3発動率: {eprx3_rate}\n"
-
-                v1_ratio = row_data.get("V1_Price_Ratio")
-                if v1_ratio:
-                    summary_text += f"  • V1価格比率: {v1_ratio}\n"
-
-        self.summary_text.setText(summary_text) 
+        
+        if not monthly_df.empty and 'Month' in monthly_df.columns:
+            monthly_df = monthly_df.sort_values('Month')
+        
+        monthly_records = monthly_df.to_dict('records') if not monthly_df.empty else []
+        self.add_log_message(f"summary_table: 月次データ {len(monthly_records)} 行")
+        
+        totals = {
+            "net_profit": 0.0,
+            "charge": 0.0,
+            "discharge": 0.0,
+            "loss": 0.0,
+            "buy": 0.0,
+            "sell": 0.0,
+            "jepx": 0.0,
+            "eprx1": 0.0,
+            "eprx3": 0.0,
+            "base_fee": 0.0,
+            "usage_fee": 0.0,
+            "surcharge": 0.0
+        }
+        price_sums = {
+            "charge": 0.0,
+            "charge_count": 0,
+            "discharge": 0.0,
+            "discharge_count": 0
+        }
+        
+        for idx in range(max_month_rows):
+            excel_row = 10 + idx
+            csv_row = make_blank_row()
+            display_row = make_blank_row()
+            
+            if idx < len(monthly_records):
+                record = monthly_records[idx]
+                
+                month_value = record.get("Month")
+                try:
+                    period = pd.Period(str(month_value), freq='M')
+                    month_start = period.to_timestamp()
+                except Exception:
+                    month_start = pd.to_datetime(month_value, errors='coerce')
+                    if pd.isna(month_start):
+                        month_start = None
+                
+                if month_start is not None:
+                    csv_row[0] = month_start.strftime("%Y-%m-%d")
+                    display_row[0] = month_start.strftime("%b-%y")
+                else:
+                    csv_row[0] = ""
+                    display_row[0] = ""
+                
+                charge = record.get("Total_Charge_kWh") or 0.0
+                discharge = record.get("Total_Discharge_kWh") or 0.0
+                avg_charge_price = record.get("Average_Charge_Price")
+                avg_discharge_price = record.get("Average_Discharge_Price")
+                monthly_net_profit = record.get("Monthly_Net_Profit")
+                
+                base_fee = record.get("Monthly_Wheeling_Basic_Fee")
+                usage_fee = record.get("Monthly_Wheeling_Usage_Fee")
+                if base_fee is None and record.get("Monthly_Wheeling_Fee") is not None:
+                    base_fee = record.get("Monthly_Wheeling_Fee")
+                if base_fee is None:
+                    base_fee = 0.0
+                if usage_fee is None:
+                    usage_fee = 0.0
+                
+                surcharge = record.get("Monthly_Renewable_Energy_Surcharge") or 0.0
+                jepx = record.get("Total_JEPX_PnL") or 0.0
+                eprx1 = record.get("Total_EPRX1_PnL") or 0.0
+                eprx3 = record.get("Total_EPRX3_PnL") or 0.0
+                
+                loss_value = charge * loss_rate_value
+                
+                if monthly_net_profit is None:
+                    monthly_net_profit = jepx - base_fee - usage_fee - surcharge
+                
+                buy_amount = charge * (avg_charge_price or 0.0)
+                sell_amount = discharge * (avg_discharge_price or 0.0)
+                
+                csv_row[1] = f"=J{excel_row}-M{excel_row}-N{excel_row}-O{excel_row}"
+                csv_row[2] = round(charge)
+                csv_row[3] = round(discharge)
+                csv_row[4] = f"=C{excel_row}*{loss_rate_formula}"
+                csv_row[5] = "" if avg_charge_price is None else round(avg_charge_price, 2)
+                csv_row[6] = "" if avg_discharge_price is None else round(avg_discharge_price, 2)
+                csv_row[7] = f"=C{excel_row}*F{excel_row}"
+                csv_row[8] = f"=D{excel_row}*G{excel_row}"
+                csv_row[9] = round(jepx)
+                csv_row[10] = round(eprx1)
+                csv_row[11] = round(eprx3)
+                csv_row[12] = round(base_fee)
+                csv_row[13] = round(usage_fee)
+                csv_row[14] = round(surcharge)
+                
+                display_row[1] = self._format_int(monthly_net_profit)
+                display_row[2] = self._format_int(charge)
+                display_row[3] = self._format_int(discharge)
+                display_row[4] = self._format_int(loss_value)
+                display_row[5] = self._format_float(avg_charge_price, 2)
+                display_row[6] = self._format_float(avg_discharge_price, 2)
+                display_row[7] = self._format_int(buy_amount)
+                display_row[8] = self._format_int(sell_amount)
+                display_row[9] = self._format_int(jepx)
+                display_row[10] = self._format_int(eprx1)
+                display_row[11] = self._format_int(eprx3)
+                display_row[12] = self._format_int(base_fee)
+                display_row[13] = self._format_int(usage_fee)
+                display_row[14] = self._format_int(surcharge)
+                
+                totals["net_profit"] += monthly_net_profit or 0.0
+                totals["charge"] += charge
+                totals["discharge"] += discharge
+                totals["loss"] += loss_value
+                totals["buy"] += buy_amount
+                totals["sell"] += sell_amount
+                totals["jepx"] += jepx
+                totals["eprx1"] += eprx1
+                totals["eprx3"] += eprx3
+                totals["base_fee"] += base_fee or 0.0
+                totals["usage_fee"] += usage_fee or 0.0
+                totals["surcharge"] += surcharge or 0.0
+                
+                if avg_charge_price is not None:
+                    price_sums["charge"] += avg_charge_price
+                    price_sums["charge_count"] += 1
+                if avg_discharge_price is not None:
+                    price_sums["discharge"] += avg_discharge_price
+                    price_sums["discharge_count"] += 1
+            else:
+                csv_row[1] = ""
+            
+            csv_rows.append(csv_row.copy())
+            display_rows.append(display_row.copy())
+        
+        # Row 22: blank
+        blank = make_blank_row()
+        csv_rows.append(blank.copy())
+        display_rows.append(blank.copy())
+        
+        # Row 23: totals/averages
+        totals_row = make_blank_row()
+        totals_row[1] = "=SUM(B10:B21)"
+        totals_row[2] = "=SUM(C10:C21)"
+        totals_row[3] = "=SUM(D10:D21)"
+        totals_row[4] = "=SUM(E10:E21)"
+        totals_row[5] = "=AVERAGE(F10:F21)"
+        totals_row[6] = "=AVERAGE(G10:G21)"
+        totals_row[7] = "=SUM(H10:H21)"
+        totals_row[8] = "=SUM(I10:I21)"
+        totals_row[9] = "=SUM(J10:J21)"
+        totals_row[10] = "=SUM(K10:K21)"
+        totals_row[11] = "=SUM(L10:L21)"
+        totals_row[12] = "=SUM(M10:M21)"
+        totals_row[13] = "=SUM(N10:N21)"
+        totals_row[14] = "=SUM(O10:O21)"
+        csv_rows.append(totals_row.copy())
+        
+        average_charge_price = (
+            price_sums["charge"] / price_sums["charge_count"]
+            if price_sums["charge_count"] > 0 else None
+        )
+        average_discharge_price = (
+            price_sums["discharge"] / price_sums["discharge_count"]
+            if price_sums["discharge_count"] > 0 else None
+        )
+        
+        display_totals = make_blank_row()
+        display_totals[1] = self._format_int(totals["net_profit"])
+        display_totals[2] = self._format_int(totals["charge"])
+        display_totals[3] = self._format_int(totals["discharge"])
+        display_totals[4] = self._format_int(totals["loss"])
+        display_totals[5] = self._format_float(average_charge_price, 2)
+        display_totals[6] = self._format_float(average_discharge_price, 2)
+        display_totals[7] = self._format_int(totals["buy"])
+        display_totals[8] = self._format_int(totals["sell"])
+        display_totals[9] = self._format_int(totals["jepx"])
+        display_totals[10] = self._format_int(totals["eprx1"])
+        display_totals[11] = self._format_int(totals["eprx3"])
+        display_totals[12] = self._format_int(totals["base_fee"])
+        display_totals[13] = self._format_int(totals["usage_fee"])
+        display_totals[14] = self._format_int(totals["surcharge"])
+        display_rows.append(display_totals.copy())
+        
+        return csv_rows, display_rows
+    
+    def _get_summary_param_texts(self, params):
+        """Build parameter description lines for summary sheet"""
+        area = self._format_area_label(params.get('target_area_name', ""))
+        voltage = self._format_voltage_label(params.get('voltage_type', ""))
+        power = params.get('battery_power_kW', "")
+        capacity = params.get('battery_capacity_kWh', "")
+        initial_soc = params.get('initial_soc_kwh', params.get('initial_soc_kWh', ""))
+        loss_rate = params.get('battery_loss_rate', 0.1)
+        
+        try:
+            power_text = f"{float(power):,.0f} kW"
+        except (TypeError, ValueError):
+            power_text = str(power) if power not in (None, "") else "-"
+        
+        try:
+            capacity_text = f"{float(capacity):,.0f} kWh"
+        except (TypeError, ValueError):
+            capacity_text = str(capacity) if capacity not in (None, "") else "-"
+        
+        try:
+            initial_text = f"{float(initial_soc):,.0f}kWh"
+        except (TypeError, ValueError):
+            initial_text = str(initial_soc) if initial_soc not in (None, "") else "-"
+        
+        try:
+            loss_rate_percent = f"{loss_rate * 100:.0f}%"
+        except (TypeError, ValueError):
+            loss_rate_percent = "-"
+        
+        return [
+            f"対象エリア：{area}",
+            f"電圧区分：{voltage}",
+            f"バッテリー出力 （KW）：{power_text}",
+            f"バッテリー容量 （kWh）：{capacity_text}",
+            f"初期蓄電量（kWh）：{initial_text}",
+            f"バッテリー損失率（%）：{loss_rate_percent}"
+        ]
+    
+    def _format_area_label(self, area_name: str) -> str:
+        if not area_name:
+            return "-"
+        translations = {
+            "Hokkaido": "北海道",
+            "Tohoku": "東北",
+            "Tokyo": "東京",
+            "Chubu": "中部",
+            "Hokuriku": "北陸",
+            "Kansai": "関西",
+            "Chugoku": "中国",
+            "Shikoku": "四国",
+            "Kyushu": "九州"
+        }
+        return translations.get(area_name, area_name)
+    
+    def _format_voltage_label(self, voltage_type: str) -> str:
+        mapping = {
+            "SHV": "特高圧",
+            "HV": "高圧",
+            "LV": "低圧"
+        }
+        return mapping.get(voltage_type, voltage_type or "-")
+    
+    def _format_int(self, value) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        if isinstance(value, float) and np.isnan(value):
+            return ""
+        try:
+            return f"{int(round(float(value))):,}"
+        except (TypeError, ValueError):
+            return ""
+    
+    def _format_float(self, value, decimals=2) -> str:
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        if isinstance(value, float) and np.isnan(value):
+            return ""
+        try:
+            return f"{float(value):,.{decimals}f}"
+        except (TypeError, ValueError):
+            return ""
     
     def _generate_ai_context_stats(self, results_data):
         """Generate comprehensive statistics for AI context"""

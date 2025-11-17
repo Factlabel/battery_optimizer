@@ -890,13 +890,15 @@ class OptimizationEngineV2(QThread):
 
             wheeling_base_charge = wheeling_data.get("wheeling_base_charge", 0.0)
             wheeling_usage_fee = wheeling_data.get("wheeling_usage_fee", 0.0)
-            monthly_wheeling_fee = (wheeling_base_charge * battery_power_kW * battery_loss_rate) + (wheeling_usage_fee * total_loss)
+            monthly_wheeling_basic_fee = wheeling_base_charge * battery_power_kW * battery_loss_rate
+            monthly_wheeling_usage_fee = wheeling_usage_fee * total_loss
+            monthly_wheeling_fee = monthly_wheeling_basic_fee + monthly_wheeling_usage_fee
             
             # Use modified renewable energy surcharge if available
             if hasattr(self.parent(), 'get_current_surcharge'):
-                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss * battery_loss_rate
+                monthly_renewable_energy_surcharge = self.parent().get_current_surcharge() * total_loss
             else:
-                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss * battery_loss_rate
+                monthly_renewable_energy_surcharge = RENEWABLE_ENERGY_SURCHARGE * total_loss
             
             action_counts = group["action"].value_counts().to_dict()
             action_counts_str = " ".join(f"{k} {v}" for k, v in action_counts.items())
@@ -939,6 +941,8 @@ class OptimizationEngineV2(QThread):
                 "Total_EPRX1_PnL": round(group["EPRX1_PnL"].sum()),
                 "Total_EPRX3_PnL": round(group["EPRX3_PnL"].sum()),
                 "Total_Monthly_PnL": round(monthly_total_pnl),
+                "Monthly_Wheeling_Basic_Fee": round(monthly_wheeling_basic_fee),
+                "Monthly_Wheeling_Usage_Fee": round(monthly_wheeling_usage_fee),
                 "Monthly_Wheeling_Fee": round(monthly_wheeling_fee),
                 "Monthly_Renewable_Energy_Surcharge": round(monthly_renewable_energy_surcharge),
                 "Monthly_Net_Profit": round(monthly_net_profit),
